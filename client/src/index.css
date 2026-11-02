@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --color-ink-900: #0b1f3a;
+  --color-ink-800: #1e293b;
+  --color-ink-700: #334155;
+  --color-ink-500: #475569;
+  --color-brand-50: #f0fdfa;
+  --color-brand-100: #ccfbf1;
+  --color-brand-600: #0f766e;
+  --color-brand-700: #115e59;
+  --color-sun-400: #fbbf24;
+  --color-sun-500: #f59e0b;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-ink-900 antialiased;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-600 ring-offset-2;
+  }
+}
+
+.aurora {
+  background:
+    radial-gradient(60% 50% at 10% 10%, rgba(45, 212, 191, 0.28) 0%, transparent 60%),
+    radial-gradient(50% 50% at 90% 20%, rgba(251, 191, 36, 0.2) 0%, transparent 60%),
+    radial-gradient(60% 60% at 50% 100%, rgba(15, 118, 110, 0.22) 0%, transparent 60%),
+    #f8fafc;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
