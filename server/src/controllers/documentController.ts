@@ -1,5 +1,7 @@
 import type { Request, Response } from "express";
+import type { NextFunction } from "express";
 import multer from "multer";
+import { z } from "zod";
 import { Document } from "../models/Document";
 import { Trip } from "../models/Trip";
 import { AppError } from "../utils/AppError";
@@ -7,18 +9,61 @@ import { assertTripOwner, assertValidId } from "../utils/ownership";
 import { routeParam } from "../utils/routeParam";
 import { extractTicketDetails } from "../services/geminiService";
 
-export const uploadDocumentMiddleware = multer({
+const uploadDocument = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = ["text/plain", "application/pdf", "image/jpeg", "image/png", "application/json"];
-    if (allowed.includes(file.mimetype) || file.originalname.match(/\.(txt|json|pdf|png|jpg|jpeg)$/i)) {
-      cb(null, true);
+  limits: { fileSize: 5 * 1024 * 1024 },
+}).single("file");
+
+export function uploadDocumentMiddleware(req: Request, res: Response, next: NextFunction) {
+  uploadDocument(req, res, (error) => {
+    if (error instanceof multer.MulterError) {
+      const message =
+        error.code === "LIMIT_FILE_SIZE"
+          ? "The uploaded file must be 5 MB or smaller."
+          : `Unable to process uploaded file: ${error.message}`;
+      next(new AppError(400, message));
       return;
     }
-    cb(null, false);
-  },
+    if (error) {
+      next(error);
+      return;
+    }
+    next();
+  });
+}
+
+const reviewSchema = z.object({
+  status: z.enum(["pending_review", "verified", "rejected"]).optional(),
+  notes: z.string().max(2000).optional(),
+  extractedData: z.object({
+    trainNumber: z.string().nullable().optional(),
+    pnr: z.string().nullable().optional(),
+    passengerName: z.string().nullable().optional(),
+    departureLocation: z.string().nullable().optional(),
+    destinationLocation: z.string().nullable().optional(),
+    departureDate: z.string().nullable().optional(),
+    ticketStatus: z.string().nullable().optional(),
+    amount: z.number().nullable().optional(),
+    notes: z.string().nullable().optional(),
+    source: z.enum(["gemini", "heuristic"]).optional(),
+  }).optional(),
 });
+
+function isSupportedTicket(file: NonNullable<Request["file"]>): boolean {
+  const extension = file.originalname.toLowerCase().split(".").pop();
+  const header = file.buffer.subarray(0, 8);
+
+  if (extension === "pdf") {
+    return file.mimetype === "application/pdf" && header.subarray(0, 5).toString() === "%PDF-";
+  }
+  if (extension === "jpg" || extension === "jpeg") {
+    return file.mimetype === "image/jpeg" && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
+  }
+  if (extension === "png") {
+    return file.mimetype === "image/png" && header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  return false;
+}
 
 function getUserId(req: Request): string {
   if (!req.userId) {
@@ -57,21 +102,22 @@ export async function createDocument(req: Request, res: Response) {
   const bodyTitle = typeof req.body.title === "string" ? req.body.title.trim() : "";
   const bodyType = typeof req.body.type === "string" ? req.body.type : "other";
   const bodyContent = typeof req.body.content === "string" ? req.body.content.trim() : "";
-  const uploadText = req.file ? req.file.buffer.toString("utf-8").trim() : "";
-  const content = uploadText || bodyContent;
-
-  if (!content && !req.file) {
-    throw new AppError(400, "Add ticket text or upload a document to save it.");
+  if (req.file && !isSupportedTicket(req.file)) {
+    throw new AppError(400, "Upload a valid PDF, JPG, or PNG file.");
   }
 
-  const extracted = await extractTicketDetails(content || "", {
+  if (!bodyContent && !req.file) {
+    throw new AppError(400, "Enter ticket details manually or upload a PDF, JPG, or PNG file.");
+  }
+
+  const extracted = await extractTicketDetails(bodyContent, {
     title: trip.title,
     origin: trip.origin,
     destination: trip.destination,
     startDate: String(trip.startDate),
     endDate: String(trip.endDate),
     purpose: trip.purpose,
-  });
+  }, req.file ? { bytes: req.file.buffer, mimeType: req.file.mimetype } : undefined);
 
   const document = await Document.create({
     userId,
@@ -80,9 +126,9 @@ export async function createDocument(req: Request, res: Response) {
     type: ["ticket", "passport", "voucher", "other"].includes(bodyType) ? bodyType : "other",
     fileName: req.file?.originalname ?? "",
     fileType: req.file?.mimetype ?? "text/plain",
-    content,
+    content: bodyContent,
     extractedData: extracted,
-    status: extracted.ticketStatus === "confirmed" ? "verified" : "pending_review",
+    status: "pending_review",
   });
 
   res.status(201).json({ document });
@@ -90,13 +136,14 @@ export async function createDocument(req: Request, res: Response) {
 
 export async function reviewDocument(req: Request, res: Response) {
   const document = await findOwnedDocument(routeParam(req.params.documentId, "document id"), getUserId(req));
-  const nextStatus = typeof req.body.status === "string" ? req.body.status : document.status;
-  if (!["pending_review", "verified", "rejected"].includes(nextStatus)) {
-    throw new AppError(400, "Status must be pending_review, verified, or rejected");
+  const parsed = reviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid document review data.");
   }
 
-  document.status = nextStatus;
-  if (typeof req.body.notes === "string") document.notes = req.body.notes;
+  if (parsed.data.status) document.status = parsed.data.status;
+  if (parsed.data.notes !== undefined) document.notes = parsed.data.notes;
+  if (parsed.data.extractedData) document.extractedData = parsed.data.extractedData;
   await document.save();
   res.json({ document });
 }

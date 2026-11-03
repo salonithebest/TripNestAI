@@ -1,11 +1,12 @@
 import { Schema, model } from "mongoose";
+import { PACKING_CATEGORIES } from "../constants";
 
 const packingItemSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     tripId: { type: Schema.Types.ObjectId, ref: "Trip", required: true },
     title: { type: String, required: true, trim: true, maxlength: 120 },
-    category: { type: String, required: true, trim: true, maxlength: 60 },
+    category: { type: String, enum: [...PACKING_CATEGORIES], required: true, trim: true },
     notes: { type: String, default: "" },
     quantity: { type: Number, default: 1, min: 1 },
     essential: { type: Boolean, default: false },

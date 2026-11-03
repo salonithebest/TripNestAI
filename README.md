@@ -44,3 +44,5 @@ npm run build
 ```
 
 The current app implements authentication, trip CRUD, journey-leg management, AI ticket extraction, packing recommendations, readiness scoring, and calendar export. Add a valid `GEMINI_API_KEY` in `server/.env` to enable AI extraction; the app falls back to a rule-based parser when it is not set.
+
+Ticket documents accept PDF, JPG, and PNG files up to 5 MB, or manually entered details. With `GEMINI_API_KEY` configured, the server sends the uploaded file to Gemini and validates the extracted fields before saving them for review. Review fields can be edited; **Save draft** keeps a document pending, and **Approve** marks it verified.

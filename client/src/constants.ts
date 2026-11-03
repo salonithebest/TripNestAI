@@ -1,5 +1,19 @@
 import type { TransportMode } from "./types";
 
+export const PACKING_CATEGORIES = [
+  "Documents",
+  "Electronics",
+  "Toiletries",
+  "Essentials",
+  "Footwear",
+  "Clothing",
+  "Health",
+  "Accessories",
+  "Leisure",
+  "Food",
+  "Custom",
+] as const;
+
 export const TRANSPORT_OPTIONS: { value: TransportMode; label: string }[] = [
   { value: "train", label: "Train" },
   { value: "flight", label: "Flight" },

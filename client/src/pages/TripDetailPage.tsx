@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { ArrowLeft, Bus, Car, Plane, Plus, Trash2, Train } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -12,9 +12,17 @@ import {
   Select,
   Spinner,
 } from "../components/ui";
-import { TRANSPORT_OPTIONS } from "../constants";
+import { PACKING_CATEGORIES, TRANSPORT_OPTIONS } from "../constants";
 import { api, getErrorMessage } from "../services/api";
-import type { JourneySegment, PackingItem, ReadinessSummary, TransportMode, TravelDocument, Trip } from "../types";
+import type {
+  JourneySegment,
+  PackingItem,
+  ReadinessSummary,
+  TicketExtractionData,
+  TransportMode,
+  TravelDocument,
+  Trip,
+} from "../types";
 import { formatDate, formatDateTime } from "../utils/format";
 
 const modeIcons = {
@@ -32,6 +40,40 @@ const emptySegment = {
   departure: "",
 };
 
+type EditableTicketFields = Record<
+  "trainNumber" | "pnr" | "passengerName" | "departureLocation" | "destinationLocation" | "departureDate" | "ticketStatus" | "amount" | "notes",
+  string
+>;
+
+const ticketFieldLabels: { key: keyof EditableTicketFields; label: string }[] = [
+  { key: "trainNumber", label: "Train number" },
+  { key: "pnr", label: "PNR / booking reference" },
+  { key: "passengerName", label: "Passenger name" },
+  { key: "departureLocation", label: "Departure location" },
+  { key: "destinationLocation", label: "Destination" },
+  { key: "departureDate", label: "Departure date" },
+  { key: "ticketStatus", label: "Ticket status" },
+  { key: "amount", label: "Amount" },
+  { key: "notes", label: "Notes" },
+];
+
+function toEditableTicketFields(data?: TicketExtractionData): EditableTicketFields {
+  const toText = (value: string | number | null | undefined) =>
+    value === null || value === undefined || value === "" ? "Not found" : String(value);
+
+  return {
+    trainNumber: toText(data?.trainNumber),
+    pnr: toText(data?.pnr),
+    passengerName: toText(data?.passengerName),
+    departureLocation: toText(data?.departureLocation),
+    destinationLocation: toText(data?.destinationLocation),
+    departureDate: toText(data?.departureDate),
+    ticketStatus: toText(data?.ticketStatus),
+    amount: toText(data?.amount),
+    notes: toText(data?.notes),
+  };
+}
+
 export default function TripDetailPage() {
   const { tripId = "" } = useParams();
   const navigate = useNavigate();
@@ -46,8 +88,13 @@ export default function TripDetailPage() {
   const [segmentError, setSegmentError] = useState("");
   const [savingSegment, setSavingSegment] = useState(false);
   const [documentForm, setDocumentForm] = useState({ title: "", type: "ticket", content: "" });
+  const [documentFile, setDocumentFile] = useState<File | null>(null);
   const [documentError, setDocumentError] = useState("");
   const [savingDocument, setSavingDocument] = useState(false);
+  const [reviewDocumentId, setReviewDocumentId] = useState("");
+  const [reviewFields, setReviewFields] = useState<EditableTicketFields>(() => toEditableTicketFields());
+  const [savingReview, setSavingReview] = useState(false);
+  const documentFileInput = useRef<HTMLInputElement>(null);
   const [packingForm, setPackingForm] = useState({ title: "", category: "Custom" });
   const [packingError, setPackingError] = useState("");
   const [savingPackingItem, setSavingPackingItem] = useState(false);
@@ -161,21 +208,90 @@ export default function TripDetailPage() {
   async function handleCreateDocument(event: FormEvent) {
     event.preventDefault();
     setDocumentError("");
+
+    if (!documentFile && !documentForm.content.trim()) {
+      setDocumentError("Choose a PDF, JPG, or PNG file, or enter details manually.");
+      return;
+    }
+
+    if (documentFile && documentFile.size > 5 * 1024 * 1024) {
+      setDocumentError("The uploaded file must be 5 MB or smaller.");
+      return;
+    }
+
     setSavingDocument(true);
 
     try {
-      await api.post(`/trips/${tripId}/documents`, {
-        title: documentForm.title,
-        type: documentForm.type,
-        content: documentForm.content,
-      });
+      let response;
+      if (documentFile) {
+        const formData = new FormData();
+        formData.append("title", documentForm.title);
+        formData.append("type", documentForm.type);
+        if (documentForm.content.trim()) formData.append("content", documentForm.content.trim());
+        formData.append("file", documentFile);
+        response = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents`, formData);
+      } else {
+        response = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents`, {
+          title: documentForm.title,
+          type: documentForm.type,
+          content: documentForm.content,
+        });
+      }
+
       setDocumentForm({ title: "", type: "ticket", content: "" });
+      setDocumentFile(null);
+      if (documentFileInput.current) documentFileInput.current.value = "";
+      setReviewDocumentId(response.data.document._id);
+      setReviewFields(toEditableTicketFields(response.data.document.extractedData));
       toast.success("Travel document saved");
       await loadPlanningData();
     } catch (err) {
       setDocumentError(getErrorMessage(err));
     } finally {
       setSavingDocument(false);
+    }
+  }
+
+  async function handleReviewDocument(status: "verified" | "pending_review") {
+    const document = documents.find((item) => item._id === reviewDocumentId);
+    if (!document) {
+      setDocumentError("Select a saved document to review.");
+      return;
+    }
+
+    const toValue = (value: string) => (value.trim() === "" || value.trim() === "Not found" ? null : value.trim());
+    const amountText = toValue(reviewFields.amount);
+    const amount = amountText === null ? null : Number(amountText);
+    if (amount !== null && !Number.isFinite(amount)) {
+      setDocumentError("Amount must be a valid number or Not found.");
+      return;
+    }
+
+    setDocumentError("");
+    setSavingReview(true);
+    try {
+      const { data } = await api.patch<{ document: TravelDocument }>(`/documents/${reviewDocumentId}`, {
+        status,
+        extractedData: {
+          trainNumber: toValue(reviewFields.trainNumber),
+          pnr: toValue(reviewFields.pnr),
+          passengerName: toValue(reviewFields.passengerName),
+          departureLocation: toValue(reviewFields.departureLocation),
+          destinationLocation: toValue(reviewFields.destinationLocation),
+          departureDate: toValue(reviewFields.departureDate),
+          ticketStatus: toValue(reviewFields.ticketStatus),
+          amount,
+          notes: toValue(reviewFields.notes),
+          source: document.extractedData?.source ?? "heuristic",
+        },
+      });
+      setDocuments((current) => current.map((item) => item._id === data.document._id ? data.document : item));
+      toast.success(status === "verified" ? "Document approved" : "Draft saved");
+      await loadPlanningData();
+    } catch (err) {
+      setDocumentError(getErrorMessage(err));
+    } finally {
+      setSavingReview(false);
     }
   }
 
@@ -378,14 +494,16 @@ export default function TripDetailPage() {
                   Weather: {readiness.weatherSummary.summary} · {readiness.weatherSummary.temperatureC}°C · {readiness.weatherSummary.precipitationChance}% rain chance
                 </p>
               )}
-              {readiness.gaps.length > 0 ? (
+              {readiness.overall === 100 ? (
+                <p className="text-sm text-ink-600">Everything looks ready for departure.</p>
+              ) : readiness.gaps.length > 0 ? (
                 <ul className="space-y-2 text-sm text-ink-600">
                   {readiness.gaps.map((gap) => (
                     <li key={gap}>• {gap}</li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-sm text-ink-600">Everything looks ready for departure.</p>
+                <p className="text-sm text-ink-600">Complete the remaining trip-readiness items.</p>
               )}
               <a
                 href={`/api/trips/${tripId}/calendar.ics`}
@@ -422,26 +540,85 @@ export default function TripDetailPage() {
                 <option value="other">Other</option>
               </Select>
             </Field>
-            <Field label="Details">
+            <Field label="Upload ticket (PDF, JPG, PNG; max 5 MB)">
+              <input
+                ref={documentFileInput}
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink-900 shadow-sm focus:border-brand-600 focus:outline-none focus:ring-4 focus:ring-brand-100"
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  setDocumentFile(file);
+                  setDocumentError(
+                    file && file.size > 5 * 1024 * 1024 ? "The uploaded file must be 5 MB or smaller." : "",
+                  );
+                }}
+              />
+            </Field>
+            {documentFile && <p className="text-xs text-ink-500">Selected: {documentFile.name}</p>}
+            <Field label="Enter details manually">
               <textarea
                 value={documentForm.content}
                 onChange={(event) => setDocumentForm({ ...documentForm, content: event.target.value })}
-                placeholder="Paste booking details or ticket text here"
+                placeholder="Use this instead of uploading a file, or add details to help extraction"
                 className="min-h-[120px] w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink-900 placeholder:text-slate-400 shadow-sm focus:border-brand-600 focus:outline-none focus:ring-4 focus:ring-brand-100"
               />
             </Field>
             <ErrorBanner message={documentError} />
             <button type="submit" className={`${primaryButtonClass} w-full`} disabled={savingDocument}>
-              {savingDocument ? "Saving..." : "Save document"}
+              {savingDocument ? "Uploading and extracting..." : "Upload / extract"}
             </button>
           </form>
+
+          {reviewDocumentId && (
+            <form
+              className="mt-5 space-y-3 rounded-xl border border-brand-100 bg-brand-50/50 p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleReviewDocument("verified");
+              }}
+            >
+              <h3 className="font-semibold text-ink-900">Review extracted details</h3>
+              {ticketFieldLabels.map(({ key, label }) => (
+                <Field key={key} label={label}>
+                  <Input
+                    value={reviewFields[key]}
+                    placeholder="Not found"
+                    onChange={(event) => setReviewFields({ ...reviewFields, [key]: event.target.value })}
+                  />
+                </Field>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={savingReview}
+                  onClick={() => void handleReviewDocument("pending_review")}
+                  className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-ink-800 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {savingReview ? "Saving..." : "Save draft"}
+                </button>
+                <button type="submit" disabled={savingReview} className={`${primaryButtonClass} flex-1`}>
+                  {savingReview ? "Approving..." : "Approve"}
+                </button>
+              </div>
+            </form>
+          )}
 
           <div className="mt-5 space-y-3">
             {documents.length === 0 ? (
               <p className="text-sm text-ink-500">No documents saved yet.</p>
             ) : (
               documents.map((document) => (
-                <div key={document._id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <button
+                  type="button"
+                  key={document._id}
+                  onClick={() => {
+                    setReviewDocumentId(document._id);
+                    setReviewFields(toEditableTicketFields(document.extractedData));
+                    setDocumentError("");
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left"
+                >
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-medium text-ink-900">{document.title}</p>
                     <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
@@ -449,7 +626,8 @@ export default function TripDetailPage() {
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-ink-500">{document.type}</p>
-                </div>
+                  <span className="mt-2 inline-block text-xs font-semibold text-brand-700">Review</span>
+                </button>
               ))
             )}
           </div>
@@ -479,12 +657,9 @@ export default function TripDetailPage() {
                 value={packingForm.category}
                 onChange={(event) => setPackingForm({ ...packingForm, category: event.target.value })}
               >
-                <option value="Custom">Custom</option>
-                <option value="Clothing">Clothing</option>
-                <option value="Footwear">Footwear</option>
-                <option value="Electronics">Electronics</option>
-                <option value="Toiletries">Toiletries</option>
-                <option value="Documents">Documents</option>
+                {PACKING_CATEGORIES.map((category) => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
               </Select>
             </Field>
             <button type="submit" disabled={savingPackingItem} className={`${primaryButtonClass} w-full`}>

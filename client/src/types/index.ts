@@ -32,8 +32,21 @@ export interface TravelDocument {
   fileType?: string;
   content?: string;
   status: TravelDocumentStatus;
-  extractedData?: Record<string, unknown>;
+  extractedData?: TicketExtractionData;
   createdAt?: string;
+}
+
+export interface TicketExtractionData {
+  trainNumber?: string | null;
+  pnr?: string | null;
+  passengerName?: string | null;
+  departureLocation?: string | null;
+  destinationLocation?: string | null;
+  departureDate?: string | null;
+  ticketStatus?: string | null;
+  amount?: number | null;
+  notes?: string | null;
+  source?: "gemini" | "heuristic";
 }
 
 export interface PackingItem {

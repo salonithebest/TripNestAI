@@ -25,13 +25,19 @@ export async function getReadiness(req: Request, res: Response) {
   const documents = await Document.find({ tripId, userId: getUserId(req) });
 
   const packedCount = items.filter((item) => item.packed).length;
-  const totalItems = items.length || 1;
-  const itemReadiness = Math.min(100, Math.round((packedCount / totalItems) * 100));
+  const totalItems = items.length;
+  const itemReadiness = totalItems ? Math.round((packedCount / totalItems) * 100) : 0;
   const documentsVerified = documents.filter((document) => document.status === "verified").length;
   const docReadiness = documents.length ? Math.min(100, Math.round((documentsVerified / documents.length) * 100)) : 100;
-  const overall = Math.min(100, Math.round(itemReadiness * 0.7 + docReadiness * 0.3));
+  const isComplete = itemReadiness === 100 && docReadiness === 100;
+  const overall = isComplete ? 100 : Math.min(99, Math.round(itemReadiness * 0.7 + docReadiness * 0.3));
 
-  const unfinished = items.filter((item) => !item.packed && item.essential).map((item) => item.title);
+  const gaps = [
+    ...(items.length === 0 ? ["Generate a packing list"] : items.filter((item) => !item.packed).map((item) => `Pack ${item.title}`)),
+    ...documents
+      .filter((document) => document.status !== "verified")
+      .map((document) => `Review and approve ${document.title}`),
+  ];
   const weatherSummary = await getWeatherSummary(trip.destination, trip.startDate);
 
   res.json({
@@ -42,7 +48,7 @@ export async function getReadiness(req: Request, res: Response) {
     totalItems,
     documentsVerified,
     totalDocuments: documents.length,
-    gaps: unfinished.slice(0, 5),
+    gaps,
     weatherSummary,
     summary: `${overall}% ready — ${packedCount}/${totalItems} packing items checked and ${documentsVerified}/${documents.length} travel documents verified.`,
   });

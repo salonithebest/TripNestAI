@@ -1,4 +1,6 @@
 import { env } from "../config/env";
+import { z } from "zod";
+import { AppError } from "../utils/AppError";
 
 async function createGeminiClient() {
   const { GoogleGenAI } = await import("@google/genai");
@@ -6,21 +8,39 @@ async function createGeminiClient() {
 }
 
 export type TicketExtraction = {
-  trainNumber?: string;
-  pnr?: string;
-  passengerName?: string;
-  departureLocation?: string;
-  destinationLocation?: string;
-  departureDate?: string;
-  ticketStatus?: string;
+  trainNumber?: string | null;
+  pnr?: string | null;
+  passengerName?: string | null;
+  departureLocation?: string | null;
+  destinationLocation?: string | null;
+  departureDate?: string | null;
+  ticketStatus?: string | null;
   amount?: number | null;
-  notes?: string;
+  notes?: string | null;
   source: "gemini" | "heuristic";
 };
 
-function buildFallbackExtraction(rawText: string, tripContext?: Record<string, string | undefined>): TicketExtraction {
+const ticketExtractionSchema = z.object({
+  trainNumber: z.string().trim().nullable().optional(),
+  pnr: z.string().trim().nullable().optional(),
+  passengerName: z.string().trim().nullable().optional(),
+  departureLocation: z.string().trim().nullable().optional(),
+  destinationLocation: z.string().trim().nullable().optional(),
+  departureDate: z.string().trim().nullable().optional(),
+  ticketStatus: z.string().trim().nullable().optional(),
+  amount: z.number().nullable().optional(),
+  notes: z.string().trim().nullable().optional(),
+});
+
+export type TicketExtractionData = z.infer<typeof ticketExtractionSchema>;
+
+export type TicketUpload = {
+  bytes: Buffer;
+  mimeType: string;
+};
+
+function buildFallbackExtraction(rawText: string): TicketExtraction {
   const normalized = rawText.trim();
-  const combined = `${normalized} ${JSON.stringify(tripContext ?? {})}`;
 
   const firstMatch = (patterns: RegExp[]) => {
     for (const pattern of patterns) {
@@ -53,76 +73,69 @@ function buildFallbackExtraction(rawText: string, tripContext?: Record<string, s
     trainNumber,
     pnr,
     passengerName,
-    departureLocation: departureLocation ?? tripContext?.origin,
-    destinationLocation: destinationLocation ?? tripContext?.destination,
-    departureDate: departureDate ?? tripContext?.startDate,
-    ticketStatus: /confirm|booked|reserved|paid/i.test(combined) ? "confirmed" : "pending_review",
-    amount: undefined,
+    departureLocation,
+    destinationLocation,
+    departureDate,
+    ticketStatus: /confirm|booked|reserved|paid/i.test(normalized) ? "confirmed" : null,
+    amount: null,
     notes: normalized.length > 0 ? "Heuristic extraction from uploaded ticket text" : "No ticket content provided",
     source: "heuristic",
   };
 }
 
-function parseJsonCandidate(text: string): TicketExtraction | null {
+function parseJsonCandidate(text: string): TicketExtractionData {
+  let decoded: unknown;
   try {
     const clean = text.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    if (parsed && typeof parsed === "object") {
-      return {
-        trainNumber: parsed.trainNumber ?? parsed.train_number,
-        pnr: parsed.pnr ?? parsed.bookingReference,
-        passengerName: parsed.passengerName ?? parsed.passenger_name,
-        departureLocation: parsed.departureLocation ?? parsed.departure_location,
-        destinationLocation: parsed.destinationLocation ?? parsed.destination_location,
-        departureDate: parsed.departureDate ?? parsed.departure_date,
-        ticketStatus: parsed.ticketStatus ?? parsed.status,
-        amount: typeof parsed.amount === "number" ? parsed.amount : undefined,
-        notes: parsed.notes,
-        source: "gemini",
-      };
-    }
+    decoded = JSON.parse(clean);
   } catch {
-    return null;
+    throw new AppError(502, "Gemini returned ticket details in an invalid format.");
   }
-  return null;
+
+  const parsed = ticketExtractionSchema.safeParse(decoded);
+  if (!parsed.success) {
+    throw new AppError(502, "Gemini returned ticket details that failed validation.");
+  }
+  return parsed.data;
 }
 
 export async function extractTicketDetails(
   rawText: string,
   tripContext?: Record<string, string | undefined>,
+  upload?: TicketUpload,
 ): Promise<TicketExtraction> {
   const normalizedText = (rawText ?? "").trim();
-  if (!normalizedText) {
-    return buildFallbackExtraction("", tripContext);
+  if (!normalizedText && !upload) {
+    throw new AppError(400, "Enter ticket details or upload a PDF, JPG, or PNG file.");
   }
 
-  const client = env.GEMINI_API_KEY ? await createGeminiClient() : null;
-  if (!client) {
-    return buildFallbackExtraction(normalizedText, tripContext);
+  if (!env.GEMINI_API_KEY) {
+    return buildFallbackExtraction(normalizedText || upload?.bytes.toString("utf8") || "");
   }
 
   try {
-    const response = (await client.models.generateContent({
+    const client = await createGeminiClient();
+    const prompt = `Extract travel ticket details as a JSON object with exactly these keys: trainNumber, pnr, passengerName, departureLocation, destinationLocation, departureDate, ticketStatus, amount, notes. Use strings or null for text fields, a number or null for amount, and null for any field not found. Do not infer missing details. Trip context: ${JSON.stringify(tripContext ?? {})}. ${normalizedText ? `Additional ticket text: ${normalizedText}` : ""}`;
+    const parts = [
+      { text: prompt },
+      ...(upload
+        ? [{ inlineData: { mimeType: upload.mimeType, data: upload.bytes.toString("base64") } }]
+        : []),
+    ];
+    const response = await client.models.generateContent({
       model: env.GEMINI_MODEL || "gemini-2.5-flash",
-      contents: [
-        {
-          text: `Extract the travel ticket details as strict JSON with keys: trainNumber, pnr, passengerName, departureLocation, destinationLocation, departureDate, ticketStatus, amount, notes. Use the trip context when text is incomplete. Context: ${JSON.stringify(tripContext ?? {})}\nTicket text:\n${normalizedText}`,
-        },
-      ],
-    })) as any;
+      contents: [{ role: "user", parts }],
+      config: { responseMimeType: "application/json" },
+    });
 
-    const parsedText =
-      response?.text ??
-      response?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("") ??
-      "";
-
-    const candidate = parseJsonCandidate(parsedText);
-    if (candidate) {
-      return { ...buildFallbackExtraction(normalizedText, tripContext), ...candidate, source: "gemini" };
+    if (!response.text) {
+      throw new AppError(502, "Gemini returned an empty ticket extraction.");
     }
-  } catch {
-    // Fall back to a rule-based extraction when the API is unavailable.
-  }
 
-  return buildFallbackExtraction(normalizedText, tripContext);
+    return { ...parseJsonCandidate(response.text), source: "gemini" };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    console.error("Gemini ticket extraction failed:", error);
+    throw new AppError(502, "Gemini could not extract this ticket. Check the AI service configuration and try again.");
+  }
 }
