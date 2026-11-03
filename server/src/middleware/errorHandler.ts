@@ -11,9 +11,29 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req, res, _next
     return;
   }
   if (typeof err === "object" && err !== null && "code" in err && err.code === 11000) {
-    res.status(409).json({
-      message: "This value already exists. For journey legs, the sequence number must be unique within a trip.",
-    });
+    const duplicateError = err as {
+      keyPattern?: Record<string, unknown>;
+      index?: unknown;
+    };
+    const duplicateKeys =
+      typeof duplicateError.keyPattern === "object" && duplicateError.keyPattern !== null
+        ? Object.keys(duplicateError.keyPattern).join(" ")
+        : "";
+    const indexName = typeof duplicateError.index === "string" ? duplicateError.index : "";
+
+    if (duplicateKeys.includes("email") || indexName.includes("email")) {
+      res.status(409).json({ message: "An account with this email already exists. Log in instead." });
+      return;
+    }
+
+    if (duplicateKeys.includes("sequence") || indexName.includes("sequence")) {
+      res.status(409).json({
+        message: "This journey leg sequence number already exists within this trip.",
+      });
+      return;
+    }
+
+    res.status(409).json({ message: "A record with these details already exists." });
     return;
   }
   if (typeof err === "object" && err !== null && "name" in err && err.name === "CastError") {

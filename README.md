@@ -43,4 +43,4 @@ npm run lint
 npm run build
 ```
 
-The current app implements authentication, trip CRUD, and journey-leg management. `GEMINI_API_KEY` is reserved for future AI features and is not used by the current application.
+The current app implements authentication, trip CRUD, journey-leg management, AI ticket extraction, packing recommendations, readiness scoring, and calendar export. Add a valid `GEMINI_API_KEY` in `server/.env` to enable AI extraction; the app falls back to a rule-based parser when it is not set.

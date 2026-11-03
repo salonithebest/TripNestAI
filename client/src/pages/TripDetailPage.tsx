@@ -14,7 +14,7 @@ import {
 } from "../components/ui";
 import { TRANSPORT_OPTIONS } from "../constants";
 import { api, getErrorMessage } from "../services/api";
-import type { JourneySegment, TransportMode, Trip } from "../types";
+import type { JourneySegment, PackingItem, ReadinessSummary, TransportMode, TravelDocument, Trip } from "../types";
 import { formatDate, formatDateTime } from "../utils/format";
 
 const modeIcons = {
@@ -37,11 +37,21 @@ export default function TripDetailPage() {
   const navigate = useNavigate();
   const [trip, setTrip] = useState<Trip | null>(null);
   const [segments, setSegments] = useState<JourneySegment[]>([]);
+  const [documents, setDocuments] = useState<TravelDocument[]>([]);
+  const [packingItems, setPackingItems] = useState<PackingItem[]>([]);
+  const [readiness, setReadiness] = useState<ReadinessSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [segmentForm, setSegmentForm] = useState(emptySegment);
   const [segmentError, setSegmentError] = useState("");
   const [savingSegment, setSavingSegment] = useState(false);
+  const [documentForm, setDocumentForm] = useState({ title: "", type: "ticket", content: "" });
+  const [documentError, setDocumentError] = useState("");
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [packingForm, setPackingForm] = useState({ title: "", category: "Custom" });
+  const [packingError, setPackingError] = useState("");
+  const [savingPackingItem, setSavingPackingItem] = useState(false);
+  const [generatingPacking, setGeneratingPacking] = useState(false);
 
   const fetchData = useCallback(
     () =>
@@ -52,24 +62,42 @@ export default function TripDetailPage() {
     [tripId],
   );
 
+  const loadPlanningData = useCallback(async () => {
+    const [documentsResponse, packingResponse, readinessResponse] = await Promise.all([
+      api.get<{ documents: TravelDocument[] }>(`/trips/${tripId}/documents`),
+      api.get<{ items: PackingItem[] }>(`/trips/${tripId}/packing`),
+      api.get<ReadinessSummary>(`/trips/${tripId}/readiness`),
+    ]);
+
+    setDocuments(documentsResponse.data.documents);
+    setPackingItems(packingResponse.data.items);
+    setReadiness(readinessResponse.data);
+  }, [tripId]);
+
   const load = useCallback(async () => {
     try {
       const [tripResponse, segmentsResponse] = await fetchData();
       setTrip(tripResponse.data.trip);
       setSegments(segmentsResponse.data.segments);
+      await loadPlanningData();
       setError("");
     } catch (err) {
       setError(getErrorMessage(err));
     }
-  }, [fetchData]);
+  }, [fetchData, loadPlanningData]);
 
   useEffect(() => {
     let active = true;
     fetchData()
-      .then(([tripResponse, segmentsResponse]) => {
+      .then(async ([tripResponse, segmentsResponse]) => {
         if (!active) return;
         setTrip(tripResponse.data.trip);
         setSegments(segmentsResponse.data.segments);
+        try {
+          await loadPlanningData();
+        } catch (err) {
+          console.warn("Failed to load trip planning data:", err);
+        }
         setError("");
       })
       .catch((err: unknown) => {
@@ -82,7 +110,7 @@ export default function TripDetailPage() {
     return () => {
       active = false;
     };
-  }, [fetchData]);
+  }, [fetchData, loadPlanningData]);
 
   async function handleAddSegment(event: FormEvent) {
     event.preventDefault();
@@ -127,6 +155,71 @@ export default function TripDetailPage() {
       navigate("/dashboard", { replace: true });
     } catch (err) {
       setError(getErrorMessage(err));
+    }
+  }
+
+  async function handleCreateDocument(event: FormEvent) {
+    event.preventDefault();
+    setDocumentError("");
+    setSavingDocument(true);
+
+    try {
+      await api.post(`/trips/${tripId}/documents`, {
+        title: documentForm.title,
+        type: documentForm.type,
+        content: documentForm.content,
+      });
+      setDocumentForm({ title: "", type: "ticket", content: "" });
+      toast.success("Travel document saved");
+      await loadPlanningData();
+    } catch (err) {
+      setDocumentError(getErrorMessage(err));
+    } finally {
+      setSavingDocument(false);
+    }
+  }
+
+  async function handleGeneratePacking() {
+    setGeneratingPacking(true);
+    setPackingError("");
+
+    try {
+      await api.post(`/trips/${tripId}/packing/generate`);
+      toast.success("Packing list generated");
+      await loadPlanningData();
+    } catch (err) {
+      setPackingError(getErrorMessage(err));
+    } finally {
+      setGeneratingPacking(false);
+    }
+  }
+
+  async function handleTogglePacking(itemId: string) {
+    try {
+      await api.patch(`/packing/${itemId}/toggle`);
+      await loadPlanningData();
+    } catch (err) {
+      setPackingError(getErrorMessage(err));
+    }
+  }
+
+  async function handleAddPackingItem(event: FormEvent) {
+    event.preventDefault();
+    setPackingError("");
+    setSavingPackingItem(true);
+
+    try {
+      await api.post(`/trips/${tripId}/packing`, {
+        title: packingForm.title,
+        category: packingForm.category,
+      });
+      setPackingForm({ title: "", category: "Custom" });
+      toast.success("Packing item added");
+      await loadPlanningData();
+    } catch (err) {
+      setPackingError(getErrorMessage(err));
+    } finally {
+      setSavingPackingItem(false);
     }
   }
 
@@ -262,6 +355,168 @@ export default function TripDetailPage() {
               {savingSegment ? "Adding..." : "Add to journey"}
             </button>
           </form>
+        </section>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-3">
+        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-ink-900">Trip readiness</h2>
+          {readiness ? (
+            <div className="mt-4 space-y-4">
+              <div className="flex items-center justify-between text-sm font-medium text-ink-700">
+                <span>Overall readiness</span>
+                <span>{readiness.overall}%</span>
+              </div>
+              <div className="h-2.5 overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-brand-600 to-sun-500"
+                  style={{ width: `${readiness.overall}%` }}
+                />
+              </div>
+              {readiness.weatherSummary && (
+                <p className="text-sm text-ink-600">
+                  Weather: {readiness.weatherSummary.summary} · {readiness.weatherSummary.temperatureC}°C · {readiness.weatherSummary.precipitationChance}% rain chance
+                </p>
+              )}
+              {readiness.gaps.length > 0 ? (
+                <ul className="space-y-2 text-sm text-ink-600">
+                  {readiness.gaps.map((gap) => (
+                    <li key={gap}>• {gap}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-ink-600">Everything looks ready for departure.</p>
+              )}
+              <a
+                href={`/api/trips/${tripId}/calendar.ics`}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100"
+              >
+                Export calendar
+              </a>
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-ink-500">Readiness is loading…</p>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-ink-900">Travel docs</h2>
+          <form onSubmit={handleCreateDocument} className="mt-4 space-y-3">
+            <Field label="Title">
+              <Input
+                value={documentForm.title}
+                onChange={(event) => setDocumentForm({ ...documentForm, title: event.target.value })}
+                placeholder="Train ticket"
+              />
+            </Field>
+            <Field label="Type">
+              <Select
+                value={documentForm.type}
+                onChange={(event) => setDocumentForm({ ...documentForm, type: event.target.value })}
+              >
+                <option value="ticket">Ticket</option>
+                <option value="passport">Passport</option>
+                <option value="voucher">Voucher</option>
+                <option value="other">Other</option>
+              </Select>
+            </Field>
+            <Field label="Details">
+              <textarea
+                value={documentForm.content}
+                onChange={(event) => setDocumentForm({ ...documentForm, content: event.target.value })}
+                placeholder="Paste booking details or ticket text here"
+                className="min-h-[120px] w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink-900 placeholder:text-slate-400 shadow-sm focus:border-brand-600 focus:outline-none focus:ring-4 focus:ring-brand-100"
+              />
+            </Field>
+            <ErrorBanner message={documentError} />
+            <button type="submit" className={`${primaryButtonClass} w-full`} disabled={savingDocument}>
+              {savingDocument ? "Saving..." : "Save document"}
+            </button>
+          </form>
+
+          <div className="mt-5 space-y-3">
+            {documents.length === 0 ? (
+              <p className="text-sm text-ink-500">No documents saved yet.</p>
+            ) : (
+              documents.map((document) => (
+                <div key={document._id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-medium text-ink-900">{document.title}</p>
+                    <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
+                      {document.status}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-ink-500">{document.type}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-ink-900">Packing checklist</h2>
+          <button
+            type="button"
+            onClick={handleGeneratePacking}
+            disabled={generatingPacking}
+            className={`${primaryButtonClass} mt-4 w-full`}
+          >
+            {generatingPacking ? "Generating..." : "Generate packing list"}
+          </button>
+
+          <form onSubmit={handleAddPackingItem} className="mt-4 space-y-3">
+            <Field label="Item">
+              <Input
+                value={packingForm.title}
+                onChange={(event) => setPackingForm({ ...packingForm, title: event.target.value })}
+                placeholder="e.g. Running shoes"
+              />
+            </Field>
+            <Field label="Category">
+              <Select
+                value={packingForm.category}
+                onChange={(event) => setPackingForm({ ...packingForm, category: event.target.value })}
+              >
+                <option value="Custom">Custom</option>
+                <option value="Clothing">Clothing</option>
+                <option value="Footwear">Footwear</option>
+                <option value="Electronics">Electronics</option>
+                <option value="Toiletries">Toiletries</option>
+                <option value="Documents">Documents</option>
+              </Select>
+            </Field>
+            <button type="submit" disabled={savingPackingItem} className={`${primaryButtonClass} w-full`}>
+              {savingPackingItem ? "Adding..." : "Add item"}
+            </button>
+          </form>
+
+          <ErrorBanner message={packingError} />
+
+          <div className="mt-5 space-y-3">
+            {packingItems.length === 0 ? (
+              <p className="text-sm text-ink-500">No packing items yet.</p>
+            ) : (
+              packingItems.map((item) => (
+                <label
+                  key={item._id}
+                  className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-ink-700"
+                >
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={item.packed}
+                      onChange={() => handleTogglePacking(item._id)}
+                      className="h-4 w-4 accent-brand-600"
+                    />
+                    <span className={item.packed ? "line-through text-ink-400" : ""}>{item.title}</span>
+                  </div>
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">{item.category}</span>
+                </label>
+              ))
+            )}
+          </div>
         </section>
       </div>
     </div>
