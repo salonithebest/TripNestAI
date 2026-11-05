@@ -50,7 +50,6 @@ function logWeatherFailure(
   result: FetchResult<unknown>,
   detail = "",
 ): void {
-  if (process.env.NODE_ENV === "production") return;
   const reason =
     result.failure === "timeout"
       ? "timeout"
