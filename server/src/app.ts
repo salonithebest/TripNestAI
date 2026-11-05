@@ -6,8 +6,13 @@ import routes from "./routes";
 
 const app = express();
 
+app.set("etag", false);
 app.use(cors({ origin: env.CLIENT_URL }));
 app.use(express.json({ limit: "1mb" }));
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({
