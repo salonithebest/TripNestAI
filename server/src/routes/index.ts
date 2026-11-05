@@ -10,12 +10,9 @@ const router = Router();
 
 router.use("/auth", authRoutes);
 router.use("/trips", tripRoutes);
-router.use("/trips", documentRoutes);
-router.use("/trips", packingRoutes);
-router.use("/trips", readinessRoutes);
 router.use("/segments", segmentRoutes);
-router.use("/documents", documentRoutes);
-router.use("/packing", packingRoutes);
-router.use("/readiness", readinessRoutes);
+router.use("/", documentRoutes);
+router.use("/", packingRoutes);
+router.use("/", readinessRoutes);
 
 export default router;

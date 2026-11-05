@@ -1,14 +1,16 @@
-import type { Request, Response } from "express";
-import type { NextFunction } from "express";
+import type { NextFunction, Request, Response } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { Document } from "../models/Document";
+import { JourneySegment } from "../models/JourneySegment";
 import { Trip } from "../models/Trip";
 import { AppError } from "../utils/AppError";
 import { assertTripOwner, assertValidId } from "../utils/ownership";
 import { routeParam } from "../utils/routeParam";
-import { extractTicketDetails } from "../services/geminiService";
+import { validateDeparture } from "../utils/validateDeparture";
+import { extractTicket } from "../services/ticketExtractor";
 
+const ticketMimeTypes = ["application/pdf", "image/jpeg", "image/png"];
 const uploadDocument = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -20,7 +22,7 @@ export function uploadDocumentMiddleware(req: Request, res: Response, next: Next
       const message =
         error.code === "LIMIT_FILE_SIZE"
           ? "The uploaded file must be 5 MB or smaller."
-          : `Unable to process uploaded file: ${error.message}`;
+          : "Upload a PDF, JPG or PNG.";
       next(new AppError(400, message));
       return;
     }
@@ -33,123 +35,206 @@ export function uploadDocumentMiddleware(req: Request, res: Response, next: Next
 }
 
 const reviewSchema = z.object({
-  status: z.enum(["pending_review", "verified", "rejected"]).optional(),
-  notes: z.string().max(2000).optional(),
-  extractedData: z.object({
-    trainNumber: z.string().nullable().optional(),
-    pnr: z.string().nullable().optional(),
-    passengerName: z.string().nullable().optional(),
-    departureLocation: z.string().nullable().optional(),
-    destinationLocation: z.string().nullable().optional(),
-    departureDate: z.string().nullable().optional(),
-    ticketStatus: z.string().nullable().optional(),
-    amount: z.number().nullable().optional(),
-    notes: z.string().nullable().optional(),
-    source: z.enum(["gemini", "heuristic"]).optional(),
-  }).optional(),
+  fields: z.object({
+    pnr: z.string().regex(/^\d{10}$/, "PNR must be exactly 10 digits").nullable(),
+    trainNumber: z.string().regex(/^\d{5}$/, "Train number must be exactly 5 digits").nullable(),
+    trainName: z.string().trim().max(100).nullable(),
+    passengerName: z.string().trim().max(100).nullable(),
+    fromStation: z.string().trim().max(100).nullable(),
+    toStation: z.string().trim().max(100).nullable(),
+    departureDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Departure date must be YYYY-MM-DD").nullable(),
+    departureTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Departure time must be HH:MM").nullable(),
+    coach: z.string().trim().max(100).nullable(),
+    seatNumber: z.string().trim().max(100).nullable(),
+    bookingStatus: z.string().trim().max(100).nullable(),
+  }),
+  approve: z.boolean(),
+}).superRefine(({ fields, approve }, context) => {
+  if (!approve) return;
+  if (!fields.pnr) {
+    context.addIssue({ code: "custom", path: ["fields", "pnr"], message: "PNR must be exactly 10 digits." });
+  }
+  if (!fields.trainNumber) {
+    context.addIssue({
+      code: "custom",
+      path: ["fields", "trainNumber"],
+      message: "Train number must be exactly 5 digits.",
+    });
+  }
+  if (!fields.fromStation) {
+    context.addIssue({ code: "custom", path: ["fields", "fromStation"], message: "From station is required." });
+  }
+  if (!fields.toStation) {
+    context.addIssue({ code: "custom", path: ["fields", "toStation"], message: "To station is required." });
+  } else if (
+    fields.fromStation &&
+    fields.fromStation.trim().toLocaleLowerCase() === fields.toStation.trim().toLocaleLowerCase()
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["fields", "toStation"],
+      message: "From station and to station must be different.",
+    });
+  }
+  if (!fields.departureDate) {
+    context.addIssue({ code: "custom", path: ["fields", "departureDate"], message: "Departure date is required." });
+  }
 });
 
-function isSupportedTicket(file: NonNullable<Request["file"]>): boolean {
-  const extension = file.originalname.toLowerCase().split(".").pop();
-  const header = file.buffer.subarray(0, 8);
+const manualFieldsSchema = z.object({
+  pnr: z.string().regex(/^\d{10}$/, "PNR must be exactly 10 digits").nullable(),
+  trainNumber: z.string().regex(/^\d{5}$/, "Train number must be exactly 5 digits").nullable(),
+  trainName: z.string().trim().max(100).nullable(),
+  passengerName: z.string().trim().max(100).nullable(),
+  fromStation: z.string().trim().max(100).nullable(),
+  toStation: z.string().trim().max(100).nullable(),
+  departureDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Departure date must be YYYY-MM-DD").nullable(),
+  departureTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Departure time must be HH:MM").nullable(),
+  coach: z.string().trim().max(100).nullable(),
+  seatNumber: z.string().trim().max(100).nullable(),
+  bookingStatus: z.string().trim().max(100).nullable(),
+});
 
-  if (extension === "pdf") {
-    return file.mimetype === "application/pdf" && header.subarray(0, 5).toString() === "%PDF-";
-  }
-  if (extension === "jpg" || extension === "jpeg") {
-    return file.mimetype === "image/jpeg" && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
-  }
-  if (extension === "png") {
-    return file.mimetype === "image/png" && header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  }
-  return false;
-}
+type UserRequest = Request & { userId?: string };
 
 function getUserId(req: Request): string {
-  if (!req.userId) {
-    throw new AppError(401, "Not authorized. Please log in.");
-  }
-  return req.userId;
+  const userId = (req as UserRequest).userId;
+  if (!userId) throw new AppError(401, "Not authorized. Please log in.");
+  return userId;
 }
 
 async function findOwnedDocument(documentId: string, userId: string) {
   assertValidId(documentId, "document id");
-  const document = await Document.findById(documentId);
-  if (!document) {
-    throw new AppError(404, "Document not found");
-  }
-
-  const trip = await Trip.findById(document.tripId);
-  if (!trip || String(trip.userId) !== userId) {
-    throw new AppError(403, "You do not have access to this document");
-  }
-
+  const document = await Document.findOne({ _id: documentId, userId });
+  if (!document) throw new AppError(404, "Document not found");
   return document;
 }
 
 export async function listDocuments(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   await assertTripOwner(tripId, getUserId(req));
-  const documents = await Document.find({ tripId }).sort({ createdAt: -1 });
+  const documents = await Document.find({ tripId, userId: getUserId(req) }).sort({ createdAt: -1 });
   res.json({ documents });
 }
 
 export async function createDocument(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   const trip = await assertTripOwner(tripId, getUserId(req));
-  const userId = getUserId(req);
+  const file = req.file;
 
-  const bodyTitle = typeof req.body.title === "string" ? req.body.title.trim() : "";
-  const bodyType = typeof req.body.type === "string" ? req.body.type : "other";
-  const bodyContent = typeof req.body.content === "string" ? req.body.content.trim() : "";
-  if (req.file && !isSupportedTicket(req.file)) {
-    throw new AppError(400, "Upload a valid PDF, JPG, or PNG file.");
+  if (!file || !ticketMimeTypes.includes(file.mimetype)) {
+    throw new AppError(400, "Upload a PDF, JPG or PNG.");
   }
 
-  if (!bodyContent && !req.file) {
-    throw new AppError(400, "Enter ticket details manually or upload a PDF, JPG, or PNG file.");
-  }
-
-  const extracted = await extractTicketDetails(bodyContent, {
-    title: trip.title,
-    origin: trip.origin,
-    destination: trip.destination,
-    startDate: String(trip.startDate),
-    endDate: String(trip.endDate),
-    purpose: trip.purpose,
-  }, req.file ? { bytes: req.file.buffer, mimeType: req.file.mimetype } : undefined);
-
+  const extraction = await extractTicket({ bytes: file.buffer, mimeType: file.mimetype });
   const document = await Document.create({
-    userId,
+    userId: getUserId(req),
     tripId,
-    title: bodyTitle || req.file?.originalname || "Travel document",
-    type: ["ticket", "passport", "voucher", "other"].includes(bodyType) ? bodyType : "other",
-    fileName: req.file?.originalname ?? "",
-    fileType: req.file?.mimetype ?? "text/plain",
-    content: bodyContent,
-    extractedData: extracted,
-    status: "pending_review",
+    documentType: "train_ticket",
+    originalFileName: file.originalname.replace(/[\\/]/g, "_").slice(0, 255),
+    mimeType: file.mimetype,
+    fileSize: file.size,
+    extractedData: extraction.fields,
+    flaggedFields: extraction.flaggedFields,
+    verificationStatus: "pending_review",
+    extractionProvider: "gemini",
   });
 
+  res.status(201).json({ document, tripDestination: trip.destination });
+}
+
+export async function createManualDocument(req: Request, res: Response) {
+  const tripId = routeParam(req.params.tripId, "trip id");
+  await assertTripOwner(tripId, getUserId(req));
+  const result = manualFieldsSchema.safeParse(req.body.fields);
+  if (!result.success) {
+    throw new AppError(400, result.error.issues[0]?.message ?? "Invalid ticket details.");
+  }
+
+  const extractedData = result.data;
+  const requiredFields = ["pnr", "trainNumber", "departureDate", "fromStation", "toStation"] as const;
+  const flaggedFields = requiredFields.filter((field) => extractedData[field] === null);
+  const document = await Document.create({
+    userId: getUserId(req),
+    tripId,
+    documentType: "train_ticket",
+    extractedData,
+    flaggedFields,
+    verificationStatus: "pending_review",
+    extractionProvider: "manual",
+  });
   res.status(201).json({ document });
 }
 
 export async function reviewDocument(req: Request, res: Response) {
-  const document = await findOwnedDocument(routeParam(req.params.documentId, "document id"), getUserId(req));
-  const parsed = reviewSchema.safeParse(req.body);
-  if (!parsed.success) {
-    throw new AppError(400, parsed.error.issues[0]?.message ?? "Invalid document review data.");
+  const document = await findOwnedDocument(
+    routeParam(req.params.documentId, "document id"),
+    getUserId(req),
+  );
+  const result = reviewSchema.safeParse(req.body);
+  if (!result.success) {
+    throw new AppError(400, result.error.issues[0]?.message ?? "Invalid ticket details.");
   }
 
-  if (parsed.data.status) document.status = parsed.data.status;
-  if (parsed.data.notes !== undefined) document.notes = parsed.data.notes;
-  if (parsed.data.extractedData) document.extractedData = parsed.data.extractedData;
+  const { fields, approve } = result.data;
+  if (fields.departureDate) {
+    const [year, month, day] = fields.departureDate.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+      throw new AppError(400, "Departure date must be a real calendar date.");
+    }
+  }
+
+  const trip = approve ? await assertTripOwner(String(document.tripId), getUserId(req)) : null;
+  if (trip) {
+    if (!fields.pnr) throw new AppError(400, "PNR must be exactly 10 digits.");
+    if (!fields.trainNumber) throw new AppError(400, "Train number must be exactly 5 digits.");
+    if (!fields.fromStation || !fields.toStation) {
+      throw new AppError(400, "From station and to station are required.");
+    }
+    if (!fields.departureDate) throw new AppError(400, "Departure date is required.");
+    validateDeparture(fields.departureDate ?? undefined, trip.startDate, trip.endDate);
+    const departure = new Date(`${fields.departureDate}T${fields.departureTime ?? "00:00"}:00.000Z`);
+    const matchingPnr = await JourneySegment.findOne({
+      tripId: trip._id,
+      transportMode: "train",
+      pnr: fields.pnr,
+    });
+    const segment =
+      matchingPnr ??
+      new JourneySegment({
+        tripId: trip._id,
+        sequence: (await JourneySegment.countDocuments({ tripId: trip._id })) + 1,
+        transportMode: "train",
+        fromLocation: fields.fromStation,
+        toLocation: fields.toStation,
+      });
+
+    segment.transportMode = "train";
+    segment.fromLocation = fields.fromStation;
+    segment.toLocation = fields.toStation;
+    segment.fromStation = fields.fromStation;
+    segment.toStation = fields.toStation;
+    segment.trainNumber = fields.trainNumber;
+    segment.pnr = fields.pnr;
+    segment.coach = fields.coach ?? undefined;
+    segment.seatNumber = fields.seatNumber ?? undefined;
+    segment.departure = departure;
+    await segment.save();
+  }
+
+  document.verifiedData = fields;
+  document.verificationStatus = approve ? "verified" : "pending_review";
   await document.save();
+
   res.json({ document });
 }
 
 export async function deleteDocument(req: Request, res: Response) {
-  const document = await findOwnedDocument(routeParam(req.params.documentId, "document id"), getUserId(req));
+  const document = await findOwnedDocument(
+    routeParam(req.params.documentId, "document id"),
+    getUserId(req),
+  );
   await document.deleteOne();
   res.json({ message: "Document deleted" });
 }

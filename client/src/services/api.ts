@@ -1,9 +1,12 @@
 import axios from "axios";
 
 export const TOKEN_KEY = "tripnest_token";
+const apiBaseUrl = import.meta.env.PROD
+  ? (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "")
+  : "/api";
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "/api",
+  baseURL: apiBaseUrl,
   headers: { "Content-Type": "application/json" },
 });
 

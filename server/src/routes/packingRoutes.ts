@@ -9,12 +9,7 @@ const router = Router();
 router.use(requireAuth);
 
 router.route("/trips/:tripId/packing").get(listPackingItems).post(validate(customPackingItemSchema), addCustomItem);
-router.route("/:tripId/packing").get(listPackingItems).post(validate(customPackingItemSchema), addCustomItem);
 router.route("/trips/:tripId/packing/generate").post(generatePackingList);
-router.route("/:tripId/packing/generate").post(generatePackingList);
-router.route("/packing/:itemId/toggle").patch(togglePacked);
-router.route("/packing/:itemId").delete(deletePackingItem);
-router.route("/:itemId/toggle").patch(togglePacked);
-router.route("/:itemId").delete(deletePackingItem);
+router.route("/packing/:itemId").patch(togglePacked).delete(deletePackingItem);
 
 export default router;

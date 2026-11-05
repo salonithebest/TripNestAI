@@ -1,5 +1,7 @@
 import type { Request, Response } from "express";
+import { Document } from "../models/Document";
 import { JourneySegment } from "../models/JourneySegment";
+import { PackingItem } from "../models/PackingItem";
 import { Trip } from "../models/Trip";
 import { AppError } from "../utils/AppError";
 import { assertTripOwner } from "../utils/ownership";
@@ -39,7 +41,11 @@ export async function updateTrip(req: Request, res: Response) {
 
 export async function deleteTrip(req: Request, res: Response) {
   const trip = await assertTripOwner(routeParam(req.params.tripId, "trip id"), getUserId(req));
-  await JourneySegment.deleteMany({ tripId: trip._id });
+  await Promise.all([
+    JourneySegment.deleteMany({ tripId: trip._id }),
+    Document.deleteMany({ tripId: trip._id, userId: getUserId(req) }),
+    PackingItem.deleteMany({ tripId: trip._id, userId: getUserId(req) }),
+  ]);
   await trip.deleteOne();
   res.json({ message: "Trip deleted" });
 }

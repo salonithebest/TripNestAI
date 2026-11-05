@@ -19,68 +19,85 @@ export interface Trip {
   purpose: string;
   notes?: string;
   status: string;
+  weather?: TripWeather | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  forecastAvailable?: boolean;
 }
 
-export type TravelDocumentStatus = "pending_review" | "verified" | "rejected";
+export interface TicketFields {
+  pnr: string | null;
+  trainNumber: string | null;
+  trainName: string | null;
+  passengerName: string | null;
+  fromStation: string | null;
+  toStation: string | null;
+  departureDate: string | null;
+  departureTime: string | null;
+  coach: string | null;
+  seatNumber: string | null;
+  bookingStatus: string | null;
+}
 
 export interface TravelDocument {
   _id: string;
   tripId: string;
-  title: string;
-  type: "ticket" | "passport" | "voucher" | "other";
-  fileName?: string;
-  fileType?: string;
-  content?: string;
-  status: TravelDocumentStatus;
-  extractedData?: TicketExtractionData;
+  documentType: "train_ticket";
+  originalFileName: string;
+  mimeType: string;
+  fileSize: number;
+  extractedData: TicketFields;
+  verifiedData?: TicketFields | null;
+  flaggedFields: string[];
+  verificationStatus: "pending_review" | "verified";
+  extractionProvider: string;
   createdAt?: string;
 }
 
-export interface TicketExtractionData {
-  trainNumber?: string | null;
-  pnr?: string | null;
-  passengerName?: string | null;
-  departureLocation?: string | null;
-  destinationLocation?: string | null;
-  departureDate?: string | null;
-  ticketStatus?: string | null;
-  amount?: number | null;
-  notes?: string | null;
-  source?: "gemini" | "heuristic";
-}
+export type PackingCategory =
+  | "clothing"
+  | "toiletries"
+  | "electronics"
+  | "documents"
+  | "essentials"
+  | "weather"
+  | "custom";
 
 export interface PackingItem {
   _id: string;
   tripId: string;
-  title: string;
-  category: string;
-  quantity: number;
-  essential: boolean;
-  packed: boolean;
-  notes?: string;
-  source?: "ai" | "manual";
+  name: string;
+  category: PackingCategory;
+  source: "rule" | "ai" | "user";
+  reason?: string;
+  isPacked: boolean;
+}
+
+export interface TripWeather {
+  minTemperatureC: number | null;
+  maxTemperatureC: number | null;
+  rainChance: number | null;
+  source: "forecast" | "seasonal";
+  label: "Forecast" | "Seasonal estimate";
 }
 
 export interface ReadinessSummary {
-  overall: number;
-  itemReadiness: number;
-  docReadiness: number;
+  tripId?: string;
+  percent: number;
+  breakdown: {
+    documents: number;
+    tripDetails: number;
+    packing: number;
+  };
+  formula: string;
+  gaps: string[];
   packedCount: number;
   totalItems: number;
-  documentsVerified: number;
+  verifiedDocuments: number;
   totalDocuments: number;
-  gaps: string[];
-  summary: string;
-  weatherSummary?: {
-    location: string;
-    date: string;
-    temperatureC: number;
-    precipitationChance: number;
-    summary: string;
-  };
 }
 
-export type TransportMode = "train" | "flight" | "bus" | "car" | "cab";
+export type TransportMode = "train";
 
 export interface JourneySegment {
   _id: string;
@@ -89,6 +106,12 @@ export interface JourneySegment {
   transportMode: TransportMode;
   fromLocation: string;
   toLocation: string;
+  fromStation?: string;
+  toStation?: string;
+  trainNumber?: string;
+  pnr?: string;
+  coach?: string;
+  seatNumber?: string;
   departure?: string;
   arrival?: string;
   bookingDetails: Record<string, unknown>;

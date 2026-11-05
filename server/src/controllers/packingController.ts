@@ -3,22 +3,26 @@ import { AppError } from "../utils/AppError";
 import { assertTripOwner, assertValidId } from "../utils/ownership";
 import { routeParam } from "../utils/routeParam";
 import { PackingItem } from "../models/PackingItem";
-import { generatePackingPlan } from "../services/packingRules";
-import { getWeatherSummary } from "../services/weatherService";
+import { JourneySegment } from "../models/JourneySegment";
+import { generatePackingRules, suggestExtraPackingItems } from "../services/packingRules";
+import { getTripWeather } from "../services/weatherService";
 
 function getUserId(req: Request): string {
-  if (!req.userId) {
-    throw new AppError(401, "Not authorized. Please log in.");
-  }
+  if (!req.userId) throw new AppError(401, "Not authorized. Please log in.");
   return req.userId;
 }
 
+function groupItems<T extends { category: string }>(items: T[]) {
+  return items.reduce<Record<string, T[]>>((groups, item) => {
+    (groups[item.category] ??= []).push(item);
+    return groups;
+  }, {});
+}
+
 async function findOwnedPackingItem(itemId: string, userId: string) {
-  assertValidId(itemId, "item id");
-  const item = await PackingItem.findById(itemId);
-  if (!item) {
-    throw new AppError(404, "Packing item not found");
-  }
+  assertValidId(itemId, "packing item id");
+  const item = await PackingItem.findOne({ _id: itemId, userId });
+  if (!item) throw new AppError(404, "Packing item not found");
   await assertTripOwner(String(item.tripId), userId);
   return item;
 }
@@ -26,77 +30,79 @@ async function findOwnedPackingItem(itemId: string, userId: string) {
 export async function listPackingItems(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   await assertTripOwner(tripId, getUserId(req));
-  const items = await PackingItem.find({ tripId }).sort({ essential: -1, category: 1, title: 1 });
-  res.json({ items });
+  const items = await PackingItem.find({ tripId, userId: getUserId(req) })
+    .sort({ category: 1, name: 1 })
+    .lean();
+  const groupedItems = groupItems(items);
+  res.json({ items, groupedItems });
 }
 
 export async function addCustomItem(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   await assertTripOwner(tripId, getUserId(req));
-  const title = typeof req.body.title === "string" ? req.body.title.trim() : "";
-  if (!title) {
-    throw new AppError(400, "Item title is required");
-  }
-
   const item = await PackingItem.create({
     userId: getUserId(req),
     tripId,
-    title,
-    category: typeof req.body.category === "string" ? req.body.category : "Custom",
-    notes: typeof req.body.notes === "string" ? req.body.notes : "",
-    quantity: Number(req.body.quantity ?? 1),
-    essential: Boolean(req.body.essential),
-    packed: Boolean(req.body.packed),
-    source: "manual",
+    name: req.body.name,
+    category: req.body.category,
+    reason: req.body.reason ?? "",
+    source: "user",
   });
-
   res.status(201).json({ item });
 }
 
 export async function generatePackingList(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   const trip = await assertTripOwner(tripId, getUserId(req));
-  const weatherSummary = await getWeatherSummary(trip.destination, trip.startDate);
-
-  const plan = generatePackingPlan({
-    trip: {
-      title: trip.title,
-      destination: trip.destination,
-      origin: trip.origin,
-      purpose: trip.purpose,
-      startDate: trip.startDate,
-      endDate: trip.endDate,
-    },
-    weatherSummary: weatherSummary ?? undefined,
+  const [weatherResult, segments] = await Promise.all([
+    getTripWeather(trip),
+    JourneySegment.find({ tripId, transportMode: "train" }).select("departure").lean(),
+  ]);
+  const ruleItems = generatePackingRules(trip, weatherResult.weather, segments);
+  const dayCount = Math.max(
+    1,
+    Math.ceil((new Date(trip.endDate).getTime() - new Date(trip.startDate).getTime()) / 86_400_000) + 1,
+  );
+  const aiResult = await suggestExtraPackingItems({
+    destination: trip.destination,
+    days: dayCount,
+    purpose: trip.purpose,
+    weather: weatherResult.weather,
   });
+  const generated = [...ruleItems, ...aiResult.items];
 
-  await PackingItem.deleteMany({ tripId, userId: getUserId(req), source: "ai" });
-  const generatedItems = await PackingItem.insertMany(
-    plan.items.map((item) => ({
-      userId: getUserId(req),
-      tripId,
-      title: item.title,
-      category: item.category,
-      quantity: item.quantity,
-      essential: item.essential,
-      packed: false,
-      notes: item.notes ?? "",
-      source: "ai",
-    })),
+  const existingItems = await PackingItem.find({ tripId, userId: getUserId(req) }).lean();
+  const packedByName = new Map(
+    existingItems.map((item) => [item.name.toLocaleLowerCase(), item.isPacked]),
   );
 
-  res.status(201).json({ items: generatedItems, summary: plan.summary, readinessHints: plan.readinessHints });
+  await PackingItem.deleteMany({ tripId, userId: getUserId(req), source: { $in: ["rule", "ai"] } });
+  const items = await PackingItem.insertMany(
+    generated.map((item) => ({
+      ...item,
+      userId: getUserId(req),
+      tripId,
+      isPacked: packedByName.get(item.name.toLocaleLowerCase()) ?? false,
+    })),
+  );
+  res.status(201).json({
+    items,
+    groupedItems: groupItems(items),
+    aiAvailable: aiResult.aiAvailable,
+    weather: weatherResult.weather,
+    forecastAvailable: weatherResult.forecastAvailable,
+  });
 }
 
 export async function togglePacked(req: Request, res: Response) {
-  const item = await findOwnedPackingItem(routeParam(req.params.itemId, "item id"), getUserId(req));
-  item.packed = !item.packed;
+  const item = await findOwnedPackingItem(routeParam(req.params.itemId, "packing item id"), getUserId(req));
+  item.isPacked = !item.isPacked;
   await item.save();
   res.json({ item });
 }
 
 export async function deletePackingItem(req: Request, res: Response) {
-  const item = await findOwnedPackingItem(routeParam(req.params.itemId, "item id"), getUserId(req));
+  const item = await findOwnedPackingItem(routeParam(req.params.itemId, "packing item id"), getUserId(req));
   await item.deleteOne();
   res.json({ message: "Packing item deleted" });
 }

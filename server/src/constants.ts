@@ -1,18 +1,14 @@
-export const TRANSPORT_MODES = ["train", "flight", "bus", "car", "cab"] as const;
+export const TRANSPORT_MODES = ["train"] as const;
 export const TRIP_PURPOSES = ["vacation", "business", "family", "pilgrimage", "other"] as const;
 export const TRIP_STATUSES = ["planned", "ongoing", "completed", "cancelled"] as const;
 export const PACKING_CATEGORIES = [
-  "Documents",
-  "Electronics",
-  "Toiletries",
-  "Essentials",
-  "Footwear",
-  "Clothing",
-  "Health",
-  "Accessories",
-  "Leisure",
-  "Food",
-  "Custom",
+  "clothing",
+  "toiletries",
+  "electronics",
+  "documents",
+  "essentials",
+  "weather",
+  "custom",
 ] as const;
 
 export type TransportMode = (typeof TRANSPORT_MODES)[number];

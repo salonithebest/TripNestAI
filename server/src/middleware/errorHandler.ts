@@ -33,6 +33,16 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, _req, res, _next
       return;
     }
 
+    if (
+      indexName === "unique_train_trip_pnr_departure" ||
+      (duplicateKeys.includes("tripId") &&
+        duplicateKeys.includes("pnr") &&
+        duplicateKeys.includes("departure"))
+    ) {
+      res.status(409).json({ message: "This train leg is already added." });
+      return;
+    }
+
     res.status(409).json({ message: "A record with these details already exists." });
     return;
   }

@@ -1,11 +1,11 @@
 import { motion } from "framer-motion";
-import { MapPin, Plane, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowUpRight, MapPin, Plane, ShieldCheck, Sparkles } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ease, fadeUp, stagger } from "../lib/motion";
 
 const highlights = [
-  { icon: MapPin, text: "One timeline for trains, flights, buses, cabs and stays" },
+  { icon: MapPin, text: "Keep train details, tickets and packing in one timeline" },
   { icon: Sparkles, text: "AI reads your train ticket and builds your packing list" },
   { icon: ShieldCheck, text: "You review every detail before anything is saved" },
 ];
@@ -20,53 +20,78 @@ export default function AuthLayout({
   children: ReactNode;
 }) {
   return (
-    <div className="aurora grid min-h-screen lg:grid-cols-2">
-      <div className="relative hidden overflow-hidden bg-ink-900 p-12 text-white lg:flex lg:flex-col lg:justify-between">
-        <motion.div
-          animate={{ scale: [1, 1.15, 1], rotate: [0, 8, 0] }}
-          transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
-          className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-brand-600/40 blur-3xl"
-        />
-        <motion.div
-          animate={{ scale: [1.1, 1, 1.1] }}
-          transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
-          className="pointer-events-none absolute -bottom-32 -left-20 h-96 w-96 rounded-full bg-sun-500/30 blur-3xl"
-        />
-        <Link to="/" className="relative flex items-center gap-2 text-lg font-semibold">
-          <Plane size={22} className="text-sun-400" /> TripNest AI
+    <div className="min-h-screen bg-[#07132f] text-white lg:grid lg:grid-cols-[1.05fr_0.95fr]">
+      <section
+        className="relative flex min-h-[38vh] flex-col justify-between overflow-hidden bg-cover bg-center px-6 py-6 sm:px-10 lg:min-h-screen lg:px-14 lg:py-10"
+        style={{
+          backgroundImage:
+            "linear-gradient(180deg,rgba(6,16,48,.28),rgba(6,16,48,.18) 42%,rgba(6,16,48,.88)),url(https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1800&q=85)",
+        }}
+      >
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-950/25 via-transparent to-cyan-950/30" />
+        <Link to="/" className="relative flex w-fit items-center gap-2 text-xl font-bold tracking-tight">
+          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 to-blue-500 text-blue-950 shadow-lg shadow-cyan-500/25">
+            <Plane size={21} />
+          </span>
+          <span>TripNest <span className="text-cyan-300">AI</span></span>
         </Link>
-        <motion.div variants={stagger} initial="hidden" animate="show" className="relative space-y-8">
-          <motion.h2 variants={fadeUp} className="text-4xl font-bold leading-tight">
-            Every trip, effortlessly organized.
+
+        <motion.div variants={stagger} initial="hidden" animate="show" className="relative my-12 max-w-xl lg:my-0">
+          <motion.p variants={fadeUp} className="mb-4 text-sm font-semibold uppercase tracking-[0.24em] text-cyan-200">
+            Plan · Explore · Travel smart
+          </motion.p>
+          <motion.h2 variants={fadeUp} className="text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl xl:text-6xl">
+            Your next adventure
+            <span className="mt-2 block font-serif font-medium italic text-cyan-200">is just a click away.</span>
           </motion.h2>
-          <ul className="space-y-4">
+          <motion.p variants={fadeUp} className="mt-5 max-w-md text-base leading-7 text-blue-50/85">
+            Bring every booking, journey leg and packing detail together in one place.
+          </motion.p>
+          <motion.ul variants={stagger} className="mt-8 grid gap-3 sm:grid-cols-2">
             {highlights.map(({ icon: Icon, text }) => (
-              <motion.li key={text} variants={fadeUp} className="flex items-start gap-3 text-slate-200">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/10">
+              <motion.li
+                key={text}
+                variants={fadeUp}
+                className="flex items-start gap-3 rounded-2xl border border-white/15 bg-slate-950/25 p-3 text-sm text-white/90 backdrop-blur-md"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cyan-300/15 text-cyan-200">
                   <Icon size={17} />
                 </span>
-                <span className="pt-1.5">{text}</span>
+                <span className="pt-1">{text}</span>
               </motion.li>
             ))}
-          </ul>
+          </motion.ul>
         </motion.div>
-        <p className="relative text-sm text-slate-400">Learn · Build · Create</p>
-      </div>
-      <div className="flex items-center justify-center px-4 py-12">
+
+        <div className="relative flex items-center justify-between border-t border-white/20 pt-4 text-xs text-white/75">
+          <span>Smart itineraries · Travel with confidence</span>
+          <span className="hidden items-center gap-1 sm:flex">Discover somewhere new <ArrowUpRight size={14} /></span>
+        </div>
+      </section>
+
+      <section className="relative flex min-h-[62vh] items-center justify-center overflow-hidden bg-[#f4f7fc] px-4 py-10 text-ink-900 sm:px-8 lg:min-h-screen lg:px-10">
+        <div className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-cyan-200/50 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-28 -left-24 h-80 w-80 rounded-full bg-violet-200/40 blur-3xl" />
         <motion.div
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, ease }}
-          className="glass w-full max-w-md rounded-3xl p-8 shadow-xl shadow-ink-900/5"
+          className="relative w-full max-w-md rounded-[2rem] border border-white/80 bg-white/90 p-6 shadow-[0_28px_90px_-40px_rgba(16,35,80,.42)] backdrop-blur-xl sm:p-9"
         >
-          <Link to="/" className="mb-6 flex items-center gap-2 font-semibold text-brand-700 lg:hidden">
-            <Plane size={20} /> TripNest AI
+          <Link to="/" className="mb-6 flex w-fit items-center gap-2 font-bold text-[#10234b] lg:hidden">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-300 to-blue-500 text-blue-950">
+              <Plane size={18} />
+            </span>
+            TripNest <span className="text-cyan-600">AI</span>
           </Link>
-          <h1 className="text-2xl font-bold text-ink-900">{title}</h1>
-          <p className="mt-1 text-sm text-ink-500">{subtitle}</p>
-          <div className="mt-6">{children}</div>
+          <div className="mb-6">
+            <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-cyan-700">A better trip starts here</p>
+            <h1 className="text-3xl font-bold tracking-tight text-[#10234b]">{title}</h1>
+            <p className="mt-2 text-sm text-slate-500">{subtitle}</p>
+          </div>
+          {children}
         </motion.div>
-      </div>
+      </section>
     </div>
   );
 }

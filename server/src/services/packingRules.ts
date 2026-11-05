@@ -1,88 +1,162 @@
-export type PackingPlanItem = {
-  title: string;
-  category: string;
-  essential: boolean;
-  quantity: number;
-  notes?: string;
+import { z } from "zod";
+import { env } from "../config/env";
+import { PACKING_CATEGORIES } from "../constants";
+import { generateWithGemini, getGeminiStatus } from "./geminiClient";
+import type { TripWeather } from "./weatherService";
+
+export type PackingSuggestion = {
+  name: string;
+  category: (typeof PACKING_CATEGORIES)[number];
+  source: "rule" | "ai";
+  reason: string;
+  isPacked: boolean;
 };
 
-export type PackingPlanInput = {
-  trip: {
-    title?: string;
-    purpose?: string;
-    destination?: string;
-    origin?: string;
-    startDate?: string | Date;
-    endDate?: string | Date;
-  };
-  weatherSummary?: {
-    summary?: string;
-    temperatureC?: number;
-    precipitationChance?: number;
-  };
-};
+const hillStationNames = [
+  "manali",
+  "shimla",
+  "mussoorie",
+  "nainital",
+  "darjeeling",
+  "ooty",
+  "munnar",
+  "leh",
+  "srinagar",
+  "gangtok",
+];
 
-export function generatePackingPlan({ trip, weatherSummary }: PackingPlanInput) {
-  const purpose = (trip.purpose ?? "vacation").toLowerCase();
-  const destination = trip.destination ?? "your destination";
-  const temperature = weatherSummary?.temperatureC ?? 23;
-  const precipitationChance = weatherSummary?.precipitationChance ?? 0;
-  const isHot = temperature >= 28;
-  const isCold = temperature <= 12;
-  const isRainy = precipitationChance >= 40;
+export function generatePackingRules(
+  trip: { destination: string; purpose: string; startDate: Date; endDate: Date },
+  weather: TripWeather | null,
+  segments: { departure?: Date | null }[],
+): PackingSuggestion[] {
+  const result: PackingSuggestion[] = [];
+  const add = (name: string, category: PackingSuggestion["category"], reason = "") =>
+    result.push({ name, category, source: "rule", reason, isPacked: false });
 
-  const baseItems: PackingPlanItem[] = [
-    { title: "Travel documents", category: "Documents", essential: true, quantity: 1, notes: "Passport, ID, and booking confirmations" },
-    { title: "Phone charger", category: "Electronics", essential: true, quantity: 1, notes: "Include power bank if travelling long hours" },
-    { title: "Toiletries kit", category: "Toiletries", essential: true, quantity: 1, notes: "Sunscreen, toothbrush, and basic toiletries" },
-    { title: "Water bottle", category: "Essentials", essential: true, quantity: 1 },
-    { title: "Comfortable walking shoes", category: "Footwear", essential: true, quantity: 1 },
-    { title: "Light jacket", category: "Clothing", essential: !isHot, quantity: 1, notes: isHot ? "Optional if evenings are cool" : "Useful for evenings and transit" },
-    { title: "Socks and underwear", category: "Clothing", essential: true, quantity: 3 },
-    { title: "Medications", category: "Health", essential: true, quantity: 1, notes: "Keep a small backup bag" },
-  ];
+  add("Train ticket (printed or saved)", "documents");
+  add("Government ID", "documents");
+  add("Phone", "electronics");
+  add("Phone charger", "electronics");
+  add("Power bank", "electronics");
+  add("Toothbrush and toothpaste", "toiletries");
+  add("Soap or body wash", "toiletries");
+  add("Medicines", "essentials");
+  add("Wallet", "essentials");
+  add("Water bottle", "essentials");
 
-  if (isHot) {
-    baseItems.push({ title: "Sunglasses", category: "Accessories", essential: true, quantity: 1 });
-    baseItems.push({ title: "Lightweight shirts", category: "Clothing", essential: true, quantity: 3, notes: "Quick-dry fabrics work best" });
-    baseItems.push({ title: "Sunscreen", category: "Toiletries", essential: true, quantity: 1 });
+  const days = Math.max(
+    1,
+    Math.min(
+      7,
+      Math.ceil((new Date(trip.endDate).getTime() - new Date(trip.startDate).getTime()) / 86_400_000) + 1,
+    ),
+  );
+  for (let day = 1; day <= days; day += 1) {
+    add(`Clothes set, day ${day}`, "clothing");
   }
 
-  if (isCold) {
-    baseItems.push({ title: "Warm layer", category: "Clothing", essential: true, quantity: 1, notes: "Thermal or fleece layer" });
-    baseItems.push({ title: "Warm cap", category: "Accessories", essential: true, quantity: 1 });
+  if (weather?.source === "forecast") {
+    if (weather.minTemperatureC !== null && weather.minTemperatureC < 15) {
+      add("Warm jacket", "weather", `Forecast low ${weather.minTemperatureC} °C.`);
+      add("Thermal wear", "weather", `Forecast low ${weather.minTemperatureC} °C.`);
+    }
+    if (weather.maxTemperatureC !== null && weather.maxTemperatureC > 32) {
+      add("Sunscreen", "weather", `Forecast high ${weather.maxTemperatureC} °C.`);
+      add("Light cotton clothes", "weather", `Forecast high ${weather.maxTemperatureC} °C.`);
+    }
+    if (weather.rainChance !== null && weather.rainChance >= 40) {
+      add("Umbrella or raincoat", "weather", `Rain chance up to ${weather.rainChance}%.`);
+    }
+  } else {
+    const destination = trip.destination.toLowerCase();
+    const month = new Date(trip.startDate).getMonth();
+    const hillStation = hillStationNames.some((name) => destination.includes(name));
+    if (hillStation || month === 11 || month === 0) {
+      add("Warm jacket", "weather", "Seasonal estimate, not a forecast.");
+    }
   }
 
-  if (isRainy) {
-    baseItems.push({ title: "Compact umbrella", category: "Accessories", essential: true, quantity: 1 });
-    baseItems.push({ title: "Rain jacket", category: "Clothing", essential: true, quantity: 1 });
+  const nightTrain = segments.some((segment) => {
+    if (!segment.departure) return false;
+    return new Date(segment.departure).getHours() >= 20;
+  });
+  if (nightTrain) {
+    add("Night-travel kit (blanket, earplugs)", "essentials", "Overnight train.");
   }
 
-  if (purpose.includes("beach") || purpose.includes("holiday") || purpose.includes("vacation")) {
-    baseItems.push({ title: "Swimwear", category: "Leisure", essential: false, quantity: 1 });
-    baseItems.push({ title: "Flip-flops", category: "Footwear", essential: false, quantity: 1 });
+  return result;
+}
+
+const suggestionSchema = z.object({
+  items: z.array(
+    z.object({
+      name: z.string().trim().min(1).max(60),
+      category: z.enum(PACKING_CATEGORIES),
+      reason: z.string().trim().max(160),
+    }).passthrough(),
+  ).max(6),
+}).passthrough();
+
+export async function suggestExtraPackingItems(input: {
+  destination: string;
+  days: number;
+  purpose: string;
+  weather: TripWeather | null;
+}): Promise<{ items: PackingSuggestion[]; aiAvailable: boolean }> {
+  if (!env.GEMINI_API_KEY) return { items: [], aiAvailable: false };
+
+  try {
+    const response = await generateWithGemini("packing suggestions", (client) =>
+      client.models.generateContent({
+        model: env.GEMINI_MODEL,
+        contents: [{
+          role: "user",
+          parts: [{
+            text: `Suggest up to 6 extra train-trip packing items, with no duplicates of ordinary essentials. Return JSON only in this shape: {"items":[{"name":"string","category":"clothing|toiletries|electronics|documents|essentials|weather|custom","reason":"string"}]}. Trip: ${JSON.stringify(input)}.`,
+          }],
+        }],
+        config: { responseMimeType: "application/json" },
+      }),
+    );
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(response.text ?? "");
+    } catch {
+      console.warn(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        provider: "gemini",
+        operation: "packing suggestions",
+        status: "invalid_json",
+      }));
+      return { items: [], aiAvailable: false };
+    }
+    const parsed = suggestionSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      console.warn(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        provider: "gemini",
+        operation: "packing suggestions",
+        status: "invalid_response",
+      }));
+      return { items: [], aiAvailable: false };
+    }
+    return {
+      items: parsed.data.items.map((item) => ({
+        ...item,
+        source: "ai" as const,
+        isPacked: false,
+      })),
+      aiAvailable: true,
+    };
+  } catch (error) {
+    console.warn(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      provider: "gemini",
+      operation: "packing suggestions",
+      status: getGeminiStatus(error) ?? "error",
+    }));
+    return { items: [], aiAvailable: false };
   }
-
-  if (purpose.includes("business") || purpose.includes("work")) {
-    baseItems.push({ title: "Laptop and charger", category: "Electronics", essential: true, quantity: 1, notes: "Keep work essentials close" });
-    baseItems.push({ title: "Smart casual outfit", category: "Clothing", essential: true, quantity: 1 });
-  }
-
-  if (purpose.includes("adventure") || purpose.includes("trek") || purpose.includes("hiking")) {
-    baseItems.push({ title: "Hiking shoes", category: "Footwear", essential: true, quantity: 1 });
-    baseItems.push({ title: "Trail snacks", category: "Food", essential: false, quantity: 1 });
-    baseItems.push({ title: "First aid pouch", category: "Health", essential: true, quantity: 1 });
-  }
-
-  const uniqueItems = Array.from(new Map(baseItems.map((item) => [`${item.category}:${item.title}`, item])).values());
-
-  return {
-    summary: `${destination} trip: pack for ${isHot ? "warm" : isCold ? "cold" : "variable"} weather${isRainy ? " with rain coverage" : ""}.`,
-    items: uniqueItems,
-    readinessHints: [
-      "Confirm all essential documents and medication are in your carry bag.",
-      "Check weather and pack an additional layer if evenings are cooler than daytime.",
-      "Tidy your washing and charging plan before departure.",
-    ],
-  };
 }

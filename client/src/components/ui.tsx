@@ -10,8 +10,8 @@ import type {
 const base =
   "inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
 
-export const primaryButtonClass = `${base} bg-brand-600 text-white shadow-md shadow-brand-600/25 hover:-translate-y-0.5 hover:bg-brand-700 hover:shadow-lg`;
-export const secondaryButtonClass = `${base} border border-slate-300 bg-white text-ink-800 shadow-sm hover:border-brand-600 hover:text-brand-700`;
+export const primaryButtonClass = `${base} bg-gradient-to-r from-cyan-500 via-blue-600 to-violet-500 text-white shadow-md shadow-blue-900/20 hover:-translate-y-0.5 hover:brightness-110 hover:shadow-lg`;
+export const secondaryButtonClass = `${base} border border-slate-200 bg-white text-ink-800 shadow-sm hover:border-cyan-500 hover:text-cyan-800`;
 export const dangerButtonClass = `${base} border border-red-200 bg-white text-red-700 hover:bg-red-50`;
 
 const inputClass =

@@ -3,83 +3,133 @@ import { AppError } from "../utils/AppError";
 import { assertTripOwner } from "../utils/ownership";
 import { routeParam } from "../utils/routeParam";
 import { Document } from "../models/Document";
+import { JourneySegment } from "../models/JourneySegment";
 import { PackingItem } from "../models/PackingItem";
-import { getWeatherSummary } from "../services/weatherService";
+import { getTripWeather } from "../services/weatherService";
 
 function getUserId(req: Request): string {
-  if (!req.userId) {
-    throw new AppError(401, "Not authorized. Please log in.");
-  }
+  if (!req.userId) throw new AppError(401, "Not authorized. Please log in.");
   return req.userId;
 }
 
 function formatICSDate(date: Date | string): string {
-  const value = new Date(date);
-  return value.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return new Date(date).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "");
+}
+
+function escapeICS(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/\r?\n/g, "\\n")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
 }
 
 export async function getReadiness(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   const trip = await assertTripOwner(tripId, getUserId(req));
-  const items = await PackingItem.find({ tripId, userId: getUserId(req) }).sort({ essential: -1, category: 1, title: 1 });
-  const documents = await Document.find({ tripId, userId: getUserId(req) });
+  const [documents, segments, items] = await Promise.all([
+    Document.find({ tripId, userId: getUserId(req) }),
+    JourneySegment.find({ tripId, transportMode: "train" }).sort({ sequence: 1 }),
+    PackingItem.find({ tripId, userId: getUserId(req) }),
+  ]);
 
-  const packedCount = items.filter((item) => item.packed).length;
-  const totalItems = items.length;
-  const itemReadiness = totalItems ? Math.round((packedCount / totalItems) * 100) : 0;
-  const documentsVerified = documents.filter((document) => document.status === "verified").length;
-  const docReadiness = documents.length ? Math.min(100, Math.round((documentsVerified / documents.length) * 100)) : 100;
-  const isComplete = itemReadiness === 100 && docReadiness === 100;
-  const overall = isComplete ? 100 : Math.min(99, Math.round(itemReadiness * 0.7 + docReadiness * 0.3));
+  const gaps: string[] = [];
+  let documentPoints = 0;
+  if (documents.length === 0) {
+    gaps.push("Upload your train ticket.");
+  } else if (documents.some((document) => document.verificationStatus !== "verified")) {
+    documentPoints = 15;
+    gaps.push("Review and approve your ticket.");
+  } else {
+    documentPoints = 30;
+  }
 
-  const gaps = [
-    ...(items.length === 0 ? ["Generate a packing list"] : items.filter((item) => !item.packed).map((item) => `Pack ${item.title}`)),
-    ...documents
-      .filter((document) => document.status !== "verified")
-      .map((document) => `Review and approve ${document.title}`),
-  ];
-  const weatherSummary = await getWeatherSummary(trip.destination, trip.startDate);
+  let tripDetailsPoints = 0;
+  const trainLeg = segments[0];
+  if (!trainLeg) {
+    gaps.push("Add a train journey.");
+  } else {
+    tripDetailsPoints += 10;
+    if (trainLeg.departure && (trainLeg.pnr || trainLeg.trainNumber)) {
+      tripDetailsPoints += 10;
+    } else {
+      if (!trainLeg.departure) gaps.push("Add the train departure time.");
+      if (!trainLeg.pnr && !trainLeg.trainNumber) gaps.push("Add a PNR or train number.");
+    }
+  }
+
+  const packedCount = items.filter((item) => item.isPacked).length;
+  const packingPoints = items.length ? Math.round((packedCount / items.length) * 50) : 0;
+  if (items.length === 0) {
+    gaps.push("Generate your packing list.");
+  } else if (packedCount < items.length) {
+    gaps.push(`Pack the remaining ${items.length - packedCount} item(s).`);
+  }
+
+  const breakdown = {
+    documents: documentPoints,
+    tripDetails: tripDetailsPoints,
+    packing: packingPoints,
+  };
+  const percent = documentPoints + tripDetailsPoints + packingPoints;
 
   res.json({
-    overall,
-    itemReadiness,
-    docReadiness,
-    packedCount,
-    totalItems,
-    documentsVerified,
-    totalDocuments: documents.length,
+    percent,
+    breakdown,
+    formula: "Documents 30 · Trip details 20 · Packing 50.",
     gaps,
-    weatherSummary,
-    summary: `${overall}% ready — ${packedCount}/${totalItems} packing items checked and ${documentsVerified}/${documents.length} travel documents verified.`,
+    packedCount,
+    totalItems: items.length,
+    verifiedDocuments: documents.filter((document) => document.verificationStatus === "verified").length,
+    totalDocuments: documents.length,
+    tripId: String(trip._id),
+  });
+}
+
+export async function getWeather(req: Request, res: Response) {
+  const tripId = routeParam(req.params.tripId, "trip id");
+  const trip = await assertTripOwner(tripId, getUserId(req));
+  const result = await getTripWeather(trip);
+  res.json({
+    weather: result.weather,
+    forecastAvailable: result.forecastAvailable,
+    latitude: trip.latitude,
+    longitude: trip.longitude,
   });
 }
 
 export async function exportCalendar(req: Request, res: Response) {
   const tripId = routeParam(req.params.tripId, "trip id");
   const trip = await assertTripOwner(tripId, getUserId(req));
+  const legs = await JourneySegment.find({ tripId, transportMode: "train" }).sort({ sequence: 1 });
+  if (legs.length === 0) throw new AppError(404, "Add a train journey first.");
 
-  const start = formatICSDate(trip.startDate);
-  const end = formatICSDate(new Date(new Date(trip.endDate).getTime() + 24 * 60 * 60 * 1000));
-  const uid = `tripnest-${tripId}-${Date.now()}@tripnest.ai`;
-  const summary = trip.title.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, " ");
-  const description = `${trip.origin} → ${trip.destination}`.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,");
+  const events = legs.map((leg) => {
+    const departure = leg.departure ?? trip.startDate;
+    const trainNumber = leg.trainNumber || "Unknown";
+    const from = leg.fromStation || leg.fromLocation;
+    const to = leg.toStation || leg.toLocation;
+    const maskedPnr = leg.pnr ? `***${leg.pnr.slice(-4)}` : "Not provided";
+    return [
+      "BEGIN:VEVENT",
+      `UID:${leg.id}@tripnest`,
+      `DTSTAMP:${formatICSDate(new Date())}Z`,
+      `DTSTART:${formatICSDate(departure)}Z`,
+      `SUMMARY:${escapeICS(`Train ${trainNumber}: ${from} to ${to}`)}`,
+      `DESCRIPTION:${escapeICS(`PNR: ${maskedPnr}`)}`,
+      "END:VEVENT",
+    ].join("\r\n");
+  });
 
   const calendar = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
     "PRODID:-//TripNest AI//EN",
-    "BEGIN:VEVENT",
-    `UID:${uid}`,
-    `DTSTAMP:${formatICSDate(new Date())}`,
-    `DTSTART:${start}`,
-    `DTEND:${end}`,
-    `SUMMARY:${summary}`,
-    `DESCRIPTION:${description}`,
-    "END:VEVENT",
+    ...events,
     "END:VCALENDAR",
   ].join("\r\n");
-
+  const fileTitle = trip.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "trip";
   res.setHeader("Content-Type", "text/calendar; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="${trip.title}.ics"`);
+  res.setHeader("Content-Disposition", `attachment; filename="tripnest-${fileTitle}.ics"`);
   res.send(calendar);
 }

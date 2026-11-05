@@ -1,77 +1,146 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { ArrowLeft, Bus, Car, Plane, Plus, Trash2, Train } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import axios from "axios";
+import { ArrowDownToLine, ArrowLeft, Check, ChevronDown, FileText, Plus, Trash2, Train } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import {
-  dangerButtonClass,
-  ErrorBanner,
-  Field,
-  Input,
-  primaryButtonClass,
-  Select,
-  Spinner,
-} from "../components/ui";
-import { PACKING_CATEGORIES, TRANSPORT_OPTIONS } from "../constants";
+import { ErrorBanner, Input, primaryButtonClass, Select, Spinner } from "../components/ui";
+import { PACKING_CATEGORIES } from "../constants";
 import { api, getErrorMessage } from "../services/api";
-import type {
-  JourneySegment,
-  PackingItem,
-  ReadinessSummary,
-  TicketExtractionData,
-  TransportMode,
-  TravelDocument,
-  Trip,
-} from "../types";
+import type { JourneySegment, PackingCategory, PackingItem, ReadinessSummary, TicketFields, TravelDocument, Trip, TripWeather } from "../types";
 import { formatDate, formatDateTime } from "../utils/format";
 
-const modeIcons = {
-  train: Train,
-  flight: Plane,
-  bus: Bus,
-  car: Car,
-  cab: Car,
-} satisfies Record<TransportMode, typeof Train>;
-
-const emptySegment = {
-  transportMode: "train" as TransportMode,
-  fromLocation: "",
-  toLocation: "",
-  departure: "",
+type EditableTicketFields = Record<keyof TicketFields, string>;
+type TripResponse = { trip: Trip };
+type TripPageData = {
+  trip: Trip;
+  segments: JourneySegment[];
+  documents: TravelDocument[];
+  packingItems: PackingItem[];
+  readiness: ReadinessSummary;
+  weather: TripWeather | null;
+  weatherError: string;
 };
+type TrainField = "fromStation" | "toStation" | "departure" | "trainNumber" | "pnr";
 
-type EditableTicketFields = Record<
-  "trainNumber" | "pnr" | "passengerName" | "departureLocation" | "destinationLocation" | "departureDate" | "ticketStatus" | "amount" | "notes",
-  string
->;
+function getTrainFieldErrors(error: unknown): Partial<Record<TrainField, string>> {
+  if (!axios.isAxiosError(error)) return {};
+  const data = error.response?.data as
+    | { message?: string; errors?: { field?: string; message?: string }[] }
+    | undefined;
+  const result: Partial<Record<TrainField, string>> = {};
+  for (const issue of data?.errors ?? []) {
+    const field = issue.field?.split(".").at(-1);
+    if (
+      (field === "fromStation" ||
+        field === "toStation" ||
+        field === "departure" ||
+        field === "departureDate" ||
+        field === "trainNumber" ||
+        field === "pnr") &&
+      issue.message
+    ) {
+      result[field === "departureDate" ? "departure" : field] = issue.message;
+    }
+  }
+  if (data?.message === "This train leg is already added.") {
+    result.pnr = data.message;
+    result.departure = data.message;
+  } else if (data?.message === "Departure must be between the trip dates.") {
+    result.departure = data.message;
+  } else if (data?.message === "PNR must be exactly 10 digits.") {
+    result.pnr = data.message;
+  } else if (data?.message === "Train number must be exactly 5 digits.") {
+    result.trainNumber = data.message;
+  }
+  return result;
+}
 
-const ticketFieldLabels: { key: keyof EditableTicketFields; label: string }[] = [
+function hasWeatherValues(weather: TripWeather | null | undefined): weather is TripWeather {
+  return Boolean(
+    weather &&
+      weather.minTemperatureC !== null &&
+      weather.maxTemperatureC !== null &&
+      weather.rainChance !== null,
+  );
+}
+
+const ticketFieldLabels: { key: keyof TicketFields; label: string }[] = [
+  { key: "pnr", label: "PNR" },
   { key: "trainNumber", label: "Train number" },
-  { key: "pnr", label: "PNR / booking reference" },
+  { key: "trainName", label: "Train name" },
   { key: "passengerName", label: "Passenger name" },
-  { key: "departureLocation", label: "Departure location" },
-  { key: "destinationLocation", label: "Destination" },
+  { key: "fromStation", label: "From station" },
+  { key: "toStation", label: "To station" },
   { key: "departureDate", label: "Departure date" },
-  { key: "ticketStatus", label: "Ticket status" },
-  { key: "amount", label: "Amount" },
-  { key: "notes", label: "Notes" },
+  { key: "departureTime", label: "Departure time" },
+  { key: "coach", label: "Coach" },
+  { key: "seatNumber", label: "Seat number" },
+  { key: "bookingStatus", label: "Booking status" },
 ];
 
-function toEditableTicketFields(data?: TicketExtractionData): EditableTicketFields {
-  const toText = (value: string | number | null | undefined) =>
-    value === null || value === undefined || value === "" ? "Not found" : String(value);
+const emptyTicket: EditableTicketFields = {
+  pnr: "",
+  trainNumber: "",
+  trainName: "",
+  passengerName: "",
+  fromStation: "",
+  toStation: "",
+  departureDate: "",
+  departureTime: "",
+  coach: "",
+  seatNumber: "",
+  bookingStatus: "",
+};
 
+function toEditableFields(fields?: TicketFields | null): EditableTicketFields {
   return {
-    trainNumber: toText(data?.trainNumber),
-    pnr: toText(data?.pnr),
-    passengerName: toText(data?.passengerName),
-    departureLocation: toText(data?.departureLocation),
-    destinationLocation: toText(data?.destinationLocation),
-    departureDate: toText(data?.departureDate),
-    ticketStatus: toText(data?.ticketStatus),
-    amount: toText(data?.amount),
-    notes: toText(data?.notes),
+    pnr: fields?.pnr ?? "",
+    trainNumber: fields?.trainNumber ?? "",
+    trainName: fields?.trainName ?? "",
+    passengerName: fields?.passengerName ?? "",
+    fromStation: fields?.fromStation ?? "",
+    toStation: fields?.toStation ?? "",
+    departureDate: fields?.departureDate ?? "",
+    departureTime: fields?.departureTime ?? "",
+    coach: fields?.coach ?? "",
+    seatNumber: fields?.seatNumber ?? "",
+    bookingStatus: fields?.bookingStatus ?? "",
   };
+}
+
+function toTicketFields(fields: EditableTicketFields): TicketFields {
+  return {
+    pnr: fields.pnr.trim() || null,
+    trainNumber: fields.trainNumber.trim() || null,
+    trainName: fields.trainName.trim() || null,
+    passengerName: fields.passengerName.trim() || null,
+    fromStation: fields.fromStation.trim() || null,
+    toStation: fields.toStation.trim() || null,
+    departureDate: fields.departureDate.trim() || null,
+    departureTime: fields.departureTime.trim() || null,
+    coach: fields.coach.trim() || null,
+    seatNumber: fields.seatNumber.trim() || null,
+    bookingStatus: fields.bookingStatus.trim() || null,
+  };
+}
+
+function SectionHeading({ title, status }: { title: string; status?: string }) {
+  return (
+    <summary className="flex min-h-12 cursor-pointer list-none items-center gap-3">
+      <span className="text-base font-semibold text-white">{title}</span>
+      {status && <span className="rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-blue-100/65">{status}</span>}
+      <ChevronDown size={17} className="ml-auto text-blue-100/60 transition-transform [[open]>&]:rotate-180" />
+    </summary>
+  );
+}
+
+function FormField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block space-y-1.5">
+      <span className="text-sm font-medium text-blue-100/85">{label}</span>
+      {children}
+    </label>
+  );
 }
 
 export default function TripDetailPage() {
@@ -82,70 +151,83 @@ export default function TripDetailPage() {
   const [documents, setDocuments] = useState<TravelDocument[]>([]);
   const [packingItems, setPackingItems] = useState<PackingItem[]>([]);
   const [readiness, setReadiness] = useState<ReadinessSummary | null>(null);
+  const [weather, setWeather] = useState<TripWeather | null>(null);
+  const [weatherError, setWeatherError] = useState("");
+  const [retryingWeather, setRetryingWeather] = useState(false);
+  const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [segmentForm, setSegmentForm] = useState(emptySegment);
   const [segmentError, setSegmentError] = useState("");
-  const [savingSegment, setSavingSegment] = useState(false);
-  const [documentForm, setDocumentForm] = useState({ title: "", type: "ticket", content: "" });
-  const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [segmentFieldErrors, setSegmentFieldErrors] = useState<Partial<Record<TrainField, string>>>({});
+  const [addingTrain, setAddingTrain] = useState(false);
   const [documentError, setDocumentError] = useState("");
-  const [savingDocument, setSavingDocument] = useState(false);
-  const [reviewDocumentId, setReviewDocumentId] = useState("");
-  const [reviewFields, setReviewFields] = useState<EditableTicketFields>(() => toEditableTicketFields());
-  const [savingReview, setSavingReview] = useState(false);
-  const documentFileInput = useRef<HTMLInputElement>(null);
-  const [packingForm, setPackingForm] = useState({ title: "", category: "Custom" });
   const [packingError, setPackingError] = useState("");
-  const [savingPackingItem, setSavingPackingItem] = useState(false);
+  const [departure, setDeparture] = useState("");
+  const [trainNumber, setTrainNumber] = useState("");
+  const [pnr, setPnr] = useState("");
+  const [fromStation, setFromStation] = useState("");
+  const [toStation, setToStation] = useState("");
+  const [documentFile, setDocumentFile] = useState<File | null>(null);
+  const [activeDocumentId, setActiveDocumentId] = useState("");
+  const [ticketFields, setTicketFields] = useState<EditableTicketFields>(emptyTicket);
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
+  const [packingName, setPackingName] = useState("");
+  const [packingCategory, setPackingCategory] = useState<PackingCategory>("custom");
   const [generatingPacking, setGeneratingPacking] = useState(false);
+  const [savingPackingItem, setSavingPackingItem] = useState(false);
 
-  const fetchData = useCallback(
-    () =>
-      Promise.all([
-        api.get<{ trip: Trip }>(`/trips/${tripId}`),
-        api.get<{ segments: JourneySegment[] }>(`/trips/${tripId}/segments`),
-      ]),
-    [tripId],
-  );
-
-  const loadPlanningData = useCallback(async () => {
-    const [documentsResponse, packingResponse, readinessResponse] = await Promise.all([
+  const fetchTripData = useCallback(async (): Promise<TripPageData> => {
+    const [tripResult, segmentsResult, documentsResult, packingResult, readinessResult] = await Promise.all([
+      api.get<TripResponse>(`/trips/${tripId}`),
+      api.get<{ segments: JourneySegment[] }>(`/trips/${tripId}/segments`),
       api.get<{ documents: TravelDocument[] }>(`/trips/${tripId}/documents`),
       api.get<{ items: PackingItem[] }>(`/trips/${tripId}/packing`),
       api.get<ReadinessSummary>(`/trips/${tripId}/readiness`),
     ]);
-
-    setDocuments(documentsResponse.data.documents);
-    setPackingItems(packingResponse.data.items);
-    setReadiness(readinessResponse.data);
+    try {
+      const { data } = await api.get<{ weather: TripWeather | null }>(`/trips/${tripId}/weather`);
+      return {
+        trip: tripResult.data.trip,
+        segments: segmentsResult.data.segments,
+        documents: documentsResult.data.documents,
+        packingItems: packingResult.data.items,
+        readiness: readinessResult.data,
+        weather: hasWeatherValues(data.weather) ? data.weather : null,
+        weatherError: hasWeatherValues(data.weather) ? "" : "Weather unavailable",
+      };
+    } catch (err) {
+      return {
+        trip: tripResult.data.trip,
+        segments: segmentsResult.data.segments,
+        documents: documentsResult.data.documents,
+        packingItems: packingResult.data.items,
+        readiness: readinessResult.data,
+        weather: null,
+        weatherError: getErrorMessage(err),
+      };
+    }
   }, [tripId]);
 
-  const load = useCallback(async () => {
-    try {
-      const [tripResponse, segmentsResponse] = await fetchData();
-      setTrip(tripResponse.data.trip);
-      setSegments(segmentsResponse.data.segments);
-      await loadPlanningData();
-      setError("");
-    } catch (err) {
-      setError(getErrorMessage(err));
-    }
-  }, [fetchData, loadPlanningData]);
+  const applyTripData = useCallback((data: TripPageData) => {
+    setTrip(data.trip);
+    setSegments(data.segments);
+    setDocuments(data.documents);
+    setPackingItems(data.packingItems);
+    setReadiness(data.readiness);
+    setWeather(data.weather);
+    setWeatherError(data.weatherError);
+  }, []);
+
+  const loadTripData = useCallback(async () => {
+    applyTripData(await fetchTripData());
+  }, [applyTripData, fetchTripData]);
 
   useEffect(() => {
     let active = true;
-    fetchData()
-      .then(async ([tripResponse, segmentsResponse]) => {
-        if (!active) return;
-        setTrip(tripResponse.data.trip);
-        setSegments(segmentsResponse.data.segments);
-        try {
-          await loadPlanningData();
-        } catch (err) {
-          console.warn("Failed to load trip planning data:", err);
-        }
-        setError("");
+    fetchTripData()
+      .then((data) => {
+        if (active) applyTripData(data);
       })
       .catch((err: unknown) => {
         if (active) setError(getErrorMessage(err));
@@ -153,98 +235,154 @@ export default function TripDetailPage() {
       .finally(() => {
         if (active) setLoading(false);
       });
-
     return () => {
       active = false;
     };
-  }, [fetchData, loadPlanningData]);
+  }, [applyTripData, fetchTripData]);
 
-  async function handleAddSegment(event: FormEvent) {
+  async function handleAddTrain(event: FormEvent) {
     event.preventDefault();
     setSegmentError("");
-    setSavingSegment(true);
-
-    const payload = {
-      transportMode: segmentForm.transportMode,
-      fromLocation: segmentForm.fromLocation,
-      toLocation: segmentForm.toLocation,
-      ...(segmentForm.departure ? { departure: segmentForm.departure } : {}),
-    };
-
-    try {
-      await api.post(`/trips/${tripId}/segments`, payload);
-      setSegmentForm(emptySegment);
-      toast.success("Journey leg added");
-      await load();
-    } catch (err) {
-      setSegmentError(getErrorMessage(err));
-    } finally {
-      setSavingSegment(false);
+    setSegmentFieldErrors({});
+    const fieldErrors: Partial<Record<TrainField, string>> = {};
+    const normalizedPnr = pnr.trim();
+    const normalizedTrainNumber = trainNumber.trim();
+    const normalizedFromStation = fromStation.trim() || trip?.origin || "";
+    const normalizedToStation = toStation.trim() || trip?.destination || "";
+    const departureDay = departure.slice(0, 10);
+    const departureDate = departure ? new Date(departure) : null;
+    if (!/^\d{10}$/.test(normalizedPnr)) fieldErrors.pnr = "PNR must be exactly 10 digits.";
+    if (!/^\d{5}$/.test(normalizedTrainNumber)) fieldErrors.trainNumber = "Train number must be exactly 5 digits.";
+    if (!normalizedFromStation) fieldErrors.fromStation = "From station is required.";
+    if (!normalizedToStation) fieldErrors.toStation = "To station is required.";
+    if (normalizedFromStation.toLocaleLowerCase() === normalizedToStation.toLocaleLowerCase()) {
+      fieldErrors.toStation = "From station and to station must be different.";
     }
-  }
-
-  async function handleDeleteSegment(id: string) {
-    if (!window.confirm("Delete this journey leg?")) return;
-    try {
-      await api.delete(`/segments/${id}`);
-      toast("Journey leg removed");
-      await load();
-    } catch (err) {
-      setError(getErrorMessage(err));
+    if (!departureDate || Number.isNaN(departureDate.getTime())) {
+      fieldErrors.departure = "Departure is required.";
+    } else if (
+      trip &&
+      (departureDay < trip.startDate.slice(0, 10) || departureDay > trip.endDate.slice(0, 10))
+    ) {
+      fieldErrors.departure = "Departure must be between the trip dates.";
     }
-  }
-
-  async function handleDeleteTrip() {
-    if (!window.confirm("Delete this trip and all its journey legs? This cannot be undone.")) return;
-    try {
-      await api.delete(`/trips/${tripId}`);
-      toast("Trip deleted");
-      navigate("/dashboard", { replace: true });
-    } catch (err) {
-      setError(getErrorMessage(err));
+    if (Object.keys(fieldErrors).length > 0) {
+      setSegmentFieldErrors(fieldErrors);
+      return;
     }
-  }
-
-  async function handleCreateDocument(event: FormEvent) {
-    event.preventDefault();
-    setDocumentError("");
-
-    if (!documentFile && !documentForm.content.trim()) {
-      setDocumentError("Choose a PDF, JPG, or PNG file, or enter details manually.");
+    if (
+      segments.some(
+        (segment) =>
+          segment.pnr === normalizedPnr &&
+          segment.departure &&
+          departureDate &&
+          new Date(segment.departure).getTime() === departureDate.getTime(),
+      )
+    ) {
+      setSegmentFieldErrors({
+        pnr: "This train leg is already added.",
+        departure: "This train leg is already added.",
+      });
       return;
     }
 
-    if (documentFile && documentFile.size > 5 * 1024 * 1024) {
+    setAddingTrain(true);
+    try {
+      await api.post(`/trips/${tripId}/segments`, {
+        transportMode: "train",
+        fromLocation: normalizedFromStation,
+        toLocation: normalizedToStation,
+        fromStation: normalizedFromStation,
+        toStation: normalizedToStation,
+        trainNumber: normalizedTrainNumber,
+        pnr: normalizedPnr,
+        ...(departureDate ? { departure: departureDate.toISOString(), departureDate: departureDay } : {}),
+      });
+      toast.success("Train journey saved");
+      await loadTripData();
+    } catch (err) {
+      const fieldIssues = getTrainFieldErrors(err);
+      setSegmentFieldErrors(fieldIssues);
+      if (Object.keys(fieldIssues).length === 0) setSegmentError(getErrorMessage(err));
+    } finally {
+      setAddingTrain(false);
+    }
+  }
+
+  async function handleRetryWeather() {
+    setRetryingWeather(true);
+    setWeatherError("");
+    try {
+      const { data } = await api.get<{ weather: TripWeather | null }>(`/trips/${tripId}/weather`);
+      if (!hasWeatherValues(data.weather)) {
+        setWeather(null);
+        setWeatherError("Weather unavailable");
+        return;
+      }
+      setWeather(data.weather);
+      setWeatherError("");
+    } catch {
+      setWeather(null);
+      setWeatherError("Weather unavailable");
+    } finally {
+      setRetryingWeather(false);
+    }
+  }
+
+  async function handleDeleteTrain(id: string) {
+    if (!window.confirm("Delete this train journey?")) return;
+    try {
+      await api.delete(`/segments/${id}`);
+      toast.success("Train journey deleted");
+      await loadTripData();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    }
+  }
+
+  async function handleUploadTicket(event: FormEvent) {
+    event.preventDefault();
+    if (!documentFile) {
+      setDocumentError("Choose a PDF, JPG or PNG ticket.");
+      return;
+    }
+    if (documentFile.size > 5 * 1024 * 1024) {
       setDocumentError("The uploaded file must be 5 MB or smaller.");
       return;
     }
 
     setSavingDocument(true);
-
+    setDocumentError("");
+    const formData = new FormData();
+    formData.append("file", documentFile);
     try {
-      let response;
-      if (documentFile) {
-        const formData = new FormData();
-        formData.append("title", documentForm.title);
-        formData.append("type", documentForm.type);
-        if (documentForm.content.trim()) formData.append("content", documentForm.content.trim());
-        formData.append("file", documentFile);
-        response = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents`, formData);
-      } else {
-        response = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents`, {
-          title: documentForm.title,
-          type: documentForm.type,
-          content: documentForm.content,
-        });
-      }
-
-      setDocumentForm({ title: "", type: "ticket", content: "" });
+      const { data } = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents`, formData);
+      setActiveDocumentId(data.document._id);
+      setTicketFields(toEditableFields(data.document.extractedData));
       setDocumentFile(null);
-      if (documentFileInput.current) documentFileInput.current.value = "";
-      setReviewDocumentId(response.data.document._id);
-      setReviewFields(toEditableTicketFields(response.data.document.extractedData));
-      toast.success("Travel document saved");
-      await loadPlanningData();
+      setManualMode(false);
+      toast.success("Ticket read. Review the fields before approving.");
+      await loadTripData();
+    } catch (err) {
+      const message = getErrorMessage(err);
+      setDocumentError(message);
+      toast.error(message);
+    } finally {
+      setSavingDocument(false);
+    }
+  }
+
+  async function handleCreateManualTicket() {
+    setDocumentError("");
+    setSavingDocument(true);
+    try {
+      const { data } = await api.post<{ document: TravelDocument }>(`/trips/${tripId}/documents/manual`, {
+        fields: toTicketFields(ticketFields),
+      });
+      setActiveDocumentId(data.document._id);
+      setTicketFields(toEditableFields(data.document.extractedData));
+      toast.success("Manual ticket details saved as a draft.");
+      await loadTripData();
     } catch (err) {
       setDocumentError(getErrorMessage(err));
     } finally {
@@ -252,57 +390,53 @@ export default function TripDetailPage() {
     }
   }
 
-  async function handleReviewDocument(status: "verified" | "pending_review") {
-    const document = documents.find((item) => item._id === reviewDocumentId);
-    if (!document) {
-      setDocumentError("Select a saved document to review.");
+  async function handleReviewTicket(approve: boolean) {
+    if (!activeDocumentId) {
+      setDocumentError("Select or add a ticket before saving.");
+      return;
+    }
+    const fields = toTicketFields(ticketFields);
+    if (fields.pnr && !/^\d{10}$/.test(fields.pnr)) {
+      setDocumentError("PNR must be exactly 10 digits.");
+      return;
+    }
+    if (fields.trainNumber && !/^\d{5}$/.test(fields.trainNumber)) {
+      setDocumentError("Train number must be exactly 5 digits.");
       return;
     }
 
-    const toValue = (value: string) => (value.trim() === "" || value.trim() === "Not found" ? null : value.trim());
-    const amountText = toValue(reviewFields.amount);
-    const amount = amountText === null ? null : Number(amountText);
-    if (amount !== null && !Number.isFinite(amount)) {
-      setDocumentError("Amount must be a valid number or Not found.");
-      return;
-    }
-
+    setSavingDocument(true);
     setDocumentError("");
-    setSavingReview(true);
     try {
-      const { data } = await api.patch<{ document: TravelDocument }>(`/documents/${reviewDocumentId}`, {
-        status,
-        extractedData: {
-          trainNumber: toValue(reviewFields.trainNumber),
-          pnr: toValue(reviewFields.pnr),
-          passengerName: toValue(reviewFields.passengerName),
-          departureLocation: toValue(reviewFields.departureLocation),
-          destinationLocation: toValue(reviewFields.destinationLocation),
-          departureDate: toValue(reviewFields.departureDate),
-          ticketStatus: toValue(reviewFields.ticketStatus),
-          amount,
-          notes: toValue(reviewFields.notes),
-          source: document.extractedData?.source ?? "heuristic",
-        },
-      });
-      setDocuments((current) => current.map((item) => item._id === data.document._id ? data.document : item));
-      toast.success(status === "verified" ? "Document approved" : "Draft saved");
-      await loadPlanningData();
+      await api.patch(`/documents/${activeDocumentId}/review`, { fields, approve });
+      toast.success(approve ? "Ticket approved and train journey saved." : "Ticket draft saved.");
+      await loadTripData();
     } catch (err) {
       setDocumentError(getErrorMessage(err));
     } finally {
-      setSavingReview(false);
+      setSavingDocument(false);
     }
+  }
+
+  function selectDocument(document: TravelDocument) {
+    setActiveDocumentId(document._id);
+    setTicketFields(toEditableFields(document.verifiedData ?? document.extractedData));
+    setManualMode(false);
+    setDocumentError("");
   }
 
   async function handleGeneratePacking() {
     setGeneratingPacking(true);
     setPackingError("");
-
     try {
-      await api.post(`/trips/${tripId}/packing/generate`);
-      toast.success("Packing list generated");
-      await loadPlanningData();
+      const { data } = await api.post<{ aiAvailable: boolean }>(`/trips/${tripId}/packing/generate`);
+      setAiAvailable(data.aiAvailable);
+      await loadTripData();
+      if (data.aiAvailable) {
+        toast.success("AI-enhanced packing list generated.");
+      } else {
+        toast.warning("Rule-based packing list generated. AI suggestions are temporarily unavailable.");
+      }
     } catch (err) {
       setPackingError(getErrorMessage(err));
     } finally {
@@ -312,26 +446,32 @@ export default function TripDetailPage() {
 
   async function handleTogglePacking(itemId: string) {
     try {
-      await api.patch(`/packing/${itemId}/toggle`);
-      await loadPlanningData();
+      await api.patch(`/packing/${itemId}`);
+      await loadTripData();
     } catch (err) {
       setPackingError(getErrorMessage(err));
     }
   }
 
-  async function handleAddPackingItem(event: FormEvent) {
+  async function handleDeletePacking(itemId: string) {
+    if (!window.confirm("Remove this packing item?")) return;
+    try {
+      await api.delete(`/packing/${itemId}`);
+      await loadTripData();
+    } catch (err) {
+      setPackingError(getErrorMessage(err));
+    }
+  }
+
+  async function handleAddPacking(event: FormEvent) {
     event.preventDefault();
     setPackingError("");
     setSavingPackingItem(true);
-
     try {
-      await api.post(`/trips/${tripId}/packing`, {
-        title: packingForm.title,
-        category: packingForm.category,
-      });
-      setPackingForm({ title: "", category: "Custom" });
-      toast.success("Packing item added");
-      await loadPlanningData();
+      await api.post(`/trips/${tripId}/packing`, { name: packingName, category: packingCategory });
+      setPackingName("");
+      await loadTripData();
+      toast.success("Packing item added.");
     } catch (err) {
       setPackingError(getErrorMessage(err));
     } finally {
@@ -339,360 +479,305 @@ export default function TripDetailPage() {
     }
   }
 
-  if (loading) return <Spinner />;
+  async function handleExportCalendar() {
+    try {
+      const { data } = await api.get<Blob>(`/trips/${tripId}/calendar.ics`, { responseType: "blob" });
+      const url = URL.createObjectURL(data);
+      const link = window.document.createElement("a");
+      link.href = url;
+      link.download = `tripnest-${trip?.title.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "trip"}.ics`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(getErrorMessage(err));
+    }
+  }
 
+  async function handleDeleteTrip() {
+    if (!window.confirm("Delete this trip and its journeys, documents and packing list? This cannot be undone.")) return;
+    try {
+      await api.delete(`/trips/${tripId}`);
+      toast.success("Trip deleted.");
+      navigate("/dashboard", { replace: true });
+    } catch (err) {
+      setError(getErrorMessage(err));
+    }
+  }
+
+  if (loading) return <Spinner />;
   if (!trip) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-4 rounded-3xl border border-white/10 bg-[#0b1c43] p-6 text-white">
         <ErrorBanner message={error || "Trip not found"} />
-        <Link to="/dashboard" className="text-sm font-semibold text-brand-700 hover:underline">
-          Back to dashboard
-        </Link>
+        <Link to="/dashboard" className="text-sm font-semibold text-cyan-200 hover:text-white">Back to dashboard</Link>
       </div>
     );
   }
 
+  const packedCount = packingItems.filter((item) => item.isPacked).length;
+  const groupedItems = packingItems.reduce<Record<string, PackingItem[]>>((groups, item) => {
+    (groups[item.category] ??= []).push(item);
+    return groups;
+  }, {});
+
   return (
-    <div className="space-y-8">
-      <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-sm font-medium text-ink-500 hover:text-ink-900">
+    <div className="space-y-6 text-white">
+      <Link to="/dashboard" className="inline-flex items-center gap-2 text-sm font-medium text-blue-100/70 hover:text-white">
         <ArrowLeft size={16} /> Back to trips
       </Link>
 
-      <div className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
-        <div>
-          <h1 className="text-2xl font-bold text-ink-900">{trip.title}</h1>
-          <p className="mt-1 text-ink-700">{trip.origin} → {trip.destination}</p>
-          <p className="mt-1 text-sm text-ink-500">
-            {formatDate(trip.startDate)} – {formatDate(trip.endDate)} ·{" "}
-            <span className="capitalize">{trip.purpose}</span>
-          </p>
-          {trip.notes && <p className="mt-3 text-sm text-ink-700">{trip.notes}</p>}
+      <section className="relative overflow-hidden rounded-3xl border border-white/10 bg-cover bg-center p-6 shadow-xl sm:p-8" style={{ backgroundImage: "linear-gradient(90deg,rgba(7,19,47,.95),rgba(7,19,47,.75) 65%,rgba(7,19,47,.45)),url(https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=1400&q=80)" }}>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[.18em] text-cyan-200">{trip.purpose}</p>
+            <h1 className="mt-2 text-3xl font-bold tracking-tight">{trip.title}</h1>
+            <p className="mt-2 text-lg text-blue-50">{trip.origin} <span className="text-cyan-200">→</span> {trip.destination}</p>
+            <p className="mt-1 text-sm text-blue-100/65">{formatDate(trip.startDate)} — {formatDate(trip.endDate)}</p>
+          </div>
+          <button onClick={handleDeleteTrip} className="rounded-xl border border-red-300/25 bg-red-400/10 px-4 py-2.5 text-sm font-semibold text-red-100 hover:bg-red-400/20">
+            Delete trip
+          </button>
         </div>
-        <button onClick={handleDeleteTrip} className={dangerButtonClass}>
-          <Trash2 size={16} /> Delete trip
-        </button>
-      </div>
+      </section>
 
       <ErrorBanner message={error} />
 
-      <div className="grid gap-8 lg:grid-cols-5">
-        <section className="space-y-4 lg:col-span-3">
-          <h2 className="text-lg font-semibold text-ink-900">Journey</h2>
-          {segments.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-white/70 p-8 text-center text-sm text-ink-500">
-              No journey legs yet. Add your first leg using the form.
-            </div>
-          ) : (
-            <ol className="relative space-y-3 before:absolute before:bottom-6 before:left-[1.15rem] before:top-6 before:w-0.5 before:bg-brand-100">
-              <AnimatePresence initial={false}>
-                {segments.map((segment) => {
-                  const Icon = modeIcons[segment.transportMode];
-                  return (
-                    <motion.li
-                      key={segment._id}
-                      layout
-                      initial={{ opacity: 0, x: -16 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 16, transition: { duration: 0.2 } }}
-                      transition={{ duration: 0.35 }}
-                      className="relative flex gap-4 rounded-2xl border border-slate-200/70 bg-white p-4 shadow-sm transition hover:shadow-md"
-                    >
-                      <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white shadow-md shadow-brand-600/30">
-                        <Icon size={18} />
-                      </div>
+      <div className="grid gap-6 xl:grid-cols-[1.4fr_.8fr]">
+        <div className="space-y-4">
+          <details id="journey" open className="rounded-3xl border border-white/10 bg-[#0b1c43] px-5 py-3 shadow-lg shadow-black/10">
+            <SectionHeading title="Journey" status={`${segments.length} train leg${segments.length === 1 ? "" : "s"}`} />
+            <div className="border-t border-white/10 pb-3 pt-4">
+              <form onSubmit={handleAddTrain} className="grid gap-3 sm:grid-cols-2">
+                <FormField label="From station">
+                  <Input value={fromStation} onChange={(event) => { setFromStation(event.target.value); setSegmentFieldErrors((previous) => ({ ...previous, fromStation: undefined })); }} placeholder={trip.origin} aria-invalid={Boolean(segmentFieldErrors.fromStation)} />
+                  {segmentFieldErrors.fromStation && <span role="alert" className="text-xs text-red-200">{segmentFieldErrors.fromStation}</span>}
+                </FormField>
+                <FormField label="To station">
+                  <Input value={toStation} onChange={(event) => { setToStation(event.target.value); setSegmentFieldErrors((previous) => ({ ...previous, toStation: undefined })); }} placeholder={trip.destination} aria-invalid={Boolean(segmentFieldErrors.toStation)} />
+                  {segmentFieldErrors.toStation && <span role="alert" className="text-xs text-red-200">{segmentFieldErrors.toStation}</span>}
+                </FormField>
+                <FormField label="Departure">
+                  <Input type="datetime-local" min={`${trip.startDate.slice(0, 10)}T00:00`} max={`${trip.endDate.slice(0, 10)}T23:59`} value={departure} onChange={(event) => { setDeparture(event.target.value); setSegmentFieldErrors((previous) => ({ ...previous, departure: undefined })); }} aria-invalid={Boolean(segmentFieldErrors.departure)} />
+                  {segmentFieldErrors.departure && <span role="alert" className="text-xs text-red-200">{segmentFieldErrors.departure}</span>}
+                </FormField>
+                <FormField label="Train number">
+                  <Input value={trainNumber} onChange={(event) => { setTrainNumber(event.target.value); setSegmentFieldErrors((previous) => ({ ...previous, trainNumber: undefined })); }} placeholder="5 digits" inputMode="numeric" aria-invalid={Boolean(segmentFieldErrors.trainNumber)} />
+                  {segmentFieldErrors.trainNumber && <span role="alert" className="text-xs text-red-200">{segmentFieldErrors.trainNumber}</span>}
+                </FormField>
+                <FormField label="PNR">
+                  <Input value={pnr} onChange={(event) => { setPnr(event.target.value); setSegmentFieldErrors((previous) => ({ ...previous, pnr: undefined })); }} placeholder="10 digits" inputMode="numeric" aria-invalid={Boolean(segmentFieldErrors.pnr)} />
+                  {segmentFieldErrors.pnr && <span role="alert" className="text-xs text-red-200">{segmentFieldErrors.pnr}</span>}
+                </FormField>
+                <div className="flex items-end"><button disabled={addingTrain} className={`${primaryButtonClass} min-h-11 w-full`}><Plus size={16} /> {addingTrain ? "Adding train leg..." : "Add train leg"}</button></div>
+                <div className="sm:col-span-2"><ErrorBanner message={segmentError} /></div>
+              </form>
+
+              {segments.length > 0 && (
+                <ol className="mt-5 space-y-3">
+                  {segments.map((segment) => (
+                    <li key={segment._id} className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.045] p-4">
+                      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-300/15 text-cyan-200"><Train size={19} /></span>
                       <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">
-                          Step {segment.sequence} · {segment.transportMode}
-                        </p>
-                        <p className="font-semibold text-ink-900">
-                          {segment.fromLocation} → {segment.toLocation}
-                        </p>
-                        {segment.departure && (
-                          <p className="text-sm text-ink-500">Departs {formatDateTime(segment.departure)}</p>
-                        )}
+                        <p className="font-semibold">{segment.fromStation || segment.fromLocation} <span className="text-cyan-200">→</span> {segment.toStation || segment.toLocation}</p>
+                        <p className="mt-1 text-xs text-blue-100/60">{segment.trainNumber ? `Train ${segment.trainNumber}` : "Train"}{segment.pnr ? ` · PNR ${segment.pnr}` : ""}{segment.departure ? ` · ${formatDateTime(segment.departure)}` : ""}</p>
                       </div>
-                      <button
-                        onClick={() => handleDeleteSegment(segment._id)}
-                        className="self-start rounded-lg p-2 text-ink-500 transition hover:bg-red-50 hover:text-red-700"
-                        aria-label="Delete journey leg"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </motion.li>
-                  );
-                })}
-              </AnimatePresence>
-            </ol>
-          )}
-        </section>
-
-        <section className="lg:col-span-2">
-          <form onSubmit={handleAddSegment} className="space-y-4 rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
-            <h2 className="flex items-center gap-2 text-lg font-semibold text-ink-900">
-              <Plus size={18} /> Add journey leg
-            </h2>
-            <Field label="Transport mode">
-              <Select
-                value={segmentForm.transportMode}
-                onChange={(event) =>
-                  setSegmentForm({ ...segmentForm, transportMode: event.target.value as TransportMode })
-                }
-              >
-                {TRANSPORT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="From">
-              <Input
-                placeholder="e.g. Surat Railway Station"
-                value={segmentForm.fromLocation}
-                onChange={(event) => setSegmentForm({ ...segmentForm, fromLocation: event.target.value })}
-                required
-              />
-            </Field>
-            <Field label="To">
-              <Input
-                placeholder="e.g. New Delhi"
-                value={segmentForm.toLocation}
-                onChange={(event) => setSegmentForm({ ...segmentForm, toLocation: event.target.value })}
-                required
-              />
-            </Field>
-            <Field label="Departure (optional)">
-              <Input
-                type="datetime-local"
-                value={segmentForm.departure}
-                onChange={(event) => setSegmentForm({ ...segmentForm, departure: event.target.value })}
-              />
-            </Field>
-            <ErrorBanner message={segmentError} />
-            <button type="submit" disabled={savingSegment} className={`${primaryButtonClass} w-full`}>
-              {savingSegment ? "Adding..." : "Add to journey"}
-            </button>
-          </form>
-        </section>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-3">
-        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-ink-900">Trip readiness</h2>
-          {readiness ? (
-            <div className="mt-4 space-y-4">
-              <div className="flex items-center justify-between text-sm font-medium text-ink-700">
-                <span>Overall readiness</span>
-                <span>{readiness.overall}%</span>
-              </div>
-              <div className="h-2.5 overflow-hidden rounded-full bg-slate-200">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-brand-600 to-sun-500"
-                  style={{ width: `${readiness.overall}%` }}
-                />
-              </div>
-              {readiness.weatherSummary && (
-                <p className="text-sm text-ink-600">
-                  Weather: {readiness.weatherSummary.summary} · {readiness.weatherSummary.temperatureC}°C · {readiness.weatherSummary.precipitationChance}% rain chance
-                </p>
-              )}
-              {readiness.overall === 100 ? (
-                <p className="text-sm text-ink-600">Everything looks ready for departure.</p>
-              ) : readiness.gaps.length > 0 ? (
-                <ul className="space-y-2 text-sm text-ink-600">
-                  {readiness.gaps.map((gap) => (
-                    <li key={gap}>• {gap}</li>
+                      <button type="button" onClick={() => void handleDeleteTrain(segment._id)} aria-label="Delete train leg" className="rounded-lg p-2 text-blue-100/50 hover:bg-red-400/10 hover:text-red-200"><Trash2 size={16} /></button>
+                    </li>
                   ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-ink-600">Complete the remaining trip-readiness items.</p>
+                </ol>
               )}
-              <a
-                href={`/api/trips/${tripId}/calendar.ics`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center rounded-xl border border-brand-200 bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100"
-              >
-                Export calendar
-              </a>
             </div>
-          ) : (
-            <p className="mt-4 text-sm text-ink-500">Readiness is loading…</p>
-          )}
-        </section>
+          </details>
 
-        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-ink-900">Travel docs</h2>
-          <form onSubmit={handleCreateDocument} className="mt-4 space-y-3">
-            <Field label="Title">
-              <Input
-                value={documentForm.title}
-                onChange={(event) => setDocumentForm({ ...documentForm, title: event.target.value })}
-                placeholder="Train ticket"
-              />
-            </Field>
-            <Field label="Type">
-              <Select
-                value={documentForm.type}
-                onChange={(event) => setDocumentForm({ ...documentForm, type: event.target.value })}
-              >
-                <option value="ticket">Ticket</option>
-                <option value="passport">Passport</option>
-                <option value="voucher">Voucher</option>
-                <option value="other">Other</option>
-              </Select>
-            </Field>
-            <Field label="Upload ticket (PDF, JPG, PNG; max 5 MB)">
-              <input
-                ref={documentFileInput}
-                type="file"
-                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
-                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink-900 shadow-sm focus:border-brand-600 focus:outline-none focus:ring-4 focus:ring-brand-100"
-                onChange={(event) => {
-                  const file = event.target.files?.[0] ?? null;
-                  setDocumentFile(file);
-                  setDocumentError(
-                    file && file.size > 5 * 1024 * 1024 ? "The uploaded file must be 5 MB or smaller." : "",
-                  );
-                }}
-              />
-            </Field>
-            {documentFile && <p className="text-xs text-ink-500">Selected: {documentFile.name}</p>}
-            <Field label="Enter details manually">
-              <textarea
-                value={documentForm.content}
-                onChange={(event) => setDocumentForm({ ...documentForm, content: event.target.value })}
-                placeholder="Use this instead of uploading a file, or add details to help extraction"
-                className="min-h-[120px] w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-ink-900 placeholder:text-slate-400 shadow-sm focus:border-brand-600 focus:outline-none focus:ring-4 focus:ring-brand-100"
-              />
-            </Field>
-            <ErrorBanner message={documentError} />
-            <button type="submit" className={`${primaryButtonClass} w-full`} disabled={savingDocument}>
-              {savingDocument ? "Uploading and extracting..." : "Upload / extract"}
-            </button>
-          </form>
+          <details id="documents" open className="rounded-3xl border border-white/10 bg-[#0b1c43] px-5 py-3 shadow-lg shadow-black/10">
+            <SectionHeading title="Travel documents" status={documents.some((document) => document.verificationStatus === "verified") ? "Verified" : documents.length ? "Review needed" : "Not added"} />
+            <div className="border-t border-white/10 pb-3 pt-4">
+              <form onSubmit={handleUploadTicket} className="space-y-3">
+                <FormField label="Upload train ticket (PDF, JPG or PNG; max 5 MB)">
+                  <input type="file" accept="application/pdf,image/jpeg,image/png,.pdf,.jpg,.jpeg,.png" onChange={(event) => setDocumentFile(event.target.files?.[0] ?? null)} className="min-h-11 w-full rounded-xl border border-white/15 bg-slate-950/25 px-3 py-2 text-sm text-white" />
+                </FormField>
+                {documentFile && <p className="text-xs text-cyan-100">{documentFile.name}</p>}
+                <div className="flex flex-wrap gap-3">
+                  <button disabled={savingDocument} className={primaryButtonClass}><FileText size={16} />{savingDocument ? "Reading your ticket..." : "Upload and read ticket"}</button>
+                  <button type="button" onClick={() => { setManualMode(true); setActiveDocumentId(""); setTicketFields(emptyTicket); }} className="min-h-11 rounded-xl border border-white/15 px-4 text-sm font-semibold text-blue-100/80 hover:bg-white/10">Enter details manually</button>
+                </div>
+                <ErrorBanner message={documentError} />
+              </form>
 
-          {reviewDocumentId && (
-            <form
-              className="mt-5 space-y-3 rounded-xl border border-brand-100 bg-brand-50/50 p-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void handleReviewDocument("verified");
-              }}
-            >
-              <h3 className="font-semibold text-ink-900">Review extracted details</h3>
-              {ticketFieldLabels.map(({ key, label }) => (
-                <Field key={key} label={label}>
-                  <Input
-                    value={reviewFields[key]}
-                    placeholder="Not found"
-                    onChange={(event) => setReviewFields({ ...reviewFields, [key]: event.target.value })}
-                  />
-                </Field>
-              ))}
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={savingReview}
-                  onClick={() => void handleReviewDocument("pending_review")}
-                  className="flex-1 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-ink-800 hover:bg-slate-50 disabled:opacity-50"
+              {documents.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {documents.map((document) => (
+                    <button key={document._id} type="button" onClick={() => selectDocument(document)} className={`rounded-xl border px-3 py-2 text-xs ${activeDocumentId === document._id ? "border-cyan-200 bg-cyan-300/10 text-cyan-100" : "border-white/10 bg-white/[0.04] text-blue-100/65"}`}>
+                      {document.originalFileName || "Manual ticket"} · {document.verificationStatus === "verified" ? "Verified" : "Pending"}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {(activeDocumentId || manualMode) && (
+                <form
+                  onSubmit={(event) => event.preventDefault()}
+                  className="mt-5 rounded-2xl border border-white/10 bg-slate-950/20 p-4"
                 >
-                  {savingReview ? "Saving..." : "Save draft"}
-                </button>
-                <button type="submit" disabled={savingReview} className={`${primaryButtonClass} flex-1`}>
-                  {savingReview ? "Approving..." : "Approve"}
+                  <div className="mb-4 flex items-center justify-between gap-2">
+                    <h3 className="font-semibold">Review ticket fields</h3>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-200">Check flagged fields</span>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {ticketFieldLabels.map(({ key, label }) => {
+                      const selected = documents.find((document) => document._id === activeDocumentId);
+                      const flagged = selected?.flaggedFields.includes(key) ?? false;
+                      return (
+                        <FormField key={key} label={label}>
+                          <div className="space-y-1">
+                            <Input
+                              value={ticketFields[key]}
+                              onChange={(event) => setTicketFields((previous) => ({ ...previous, [key]: event.target.value }))}
+                              placeholder="Not found"
+                              type={key === "departureDate" ? "date" : key === "departureTime" ? "time" : "text"}
+                              className={flagged ? "border-amber-300 ring-2 ring-amber-300/15" : ""}
+                            />
+                            {!ticketFields[key] && (key === "departureDate" || key === "departureTime") && (
+                              <span className="block text-xs text-blue-100/55">Not found</span>
+                            )}
+                            {flagged && <span className="text-xs font-medium text-amber-200">Please check</span>}
+                          </div>
+                        </FormField>
+                      );
+                    })}
+                  </div>
+                  {manualMode && !activeDocumentId ? (
+                    <button type="button" disabled={savingDocument} onClick={() => void handleCreateManualTicket()} className={`${primaryButtonClass} mt-4`}>{savingDocument ? "Saving..." : "Save manual draft"}</button>
+                  ) : (
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      <button type="button" disabled={savingDocument} onClick={() => void handleReviewTicket(false)} className="min-h-11 rounded-xl border border-white/15 px-4 text-sm font-semibold text-blue-100 hover:bg-white/10">{savingDocument ? "Saving..." : "Save draft"}</button>
+                      <button type="button" disabled={savingDocument} onClick={() => void handleReviewTicket(true)} className={primaryButtonClass}><Check size={16} />{savingDocument ? "Saving..." : "Approve ticket"}</button>
+                    </div>
+                  )}
+                  <div className="mt-3"><ErrorBanner message={documentError} /></div>
+                </form>
+              )}
+            </div>
+          </details>
+
+          <details id="packing" open className="rounded-3xl border border-white/10 bg-[#0b1c43] px-5 py-3 shadow-lg shadow-black/10">
+            <SectionHeading title="Smart packing" status={packingItems.length ? `${packedCount} of ${packingItems.length} packed` : "Not generated"} />
+            <div className="border-t border-white/10 pb-3 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-blue-100/60">{packedCount} of {packingItems.length} packed</p>
+                <button type="button" onClick={() => void handleGeneratePacking()} disabled={generatingPacking} className={primaryButtonClass}>{generatingPacking ? "Generating..." : "Generate list"}</button>
+              </div>
+              {aiAvailable === false && <p className="mt-3 text-xs text-amber-200">AI suggestions are unavailable; this list uses trip rules only.</p>}
+              <ErrorBanner message={packingError} />
+              <form onSubmit={handleAddPacking} className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                <Input value={packingName} onChange={(event) => setPackingName(event.target.value)} placeholder="Add a custom item" required />
+                <Select value={packingCategory} onChange={(event) => setPackingCategory(event.target.value as PackingCategory)}>
+                  {PACKING_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                </Select>
+                <button disabled={savingPackingItem} className={primaryButtonClass}>{savingPackingItem ? "Adding..." : "Add item"}</button>
+              </form>
+              <div className="mt-5 space-y-4">
+                {Object.entries(groupedItems).map(([category, items]) => (
+                  <section key={category}>
+                    <h3 className="mb-2 text-xs font-bold uppercase tracking-[.15em] text-cyan-200">{category}</h3>
+                    <ul className="space-y-2">
+                      {items.map((item) => (
+                        <li key={item._id} className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5">
+                          <input type="checkbox" checked={item.isPacked} onChange={() => void handleTogglePacking(item._id)} className="mt-1 h-4 w-4 accent-cyan-400" aria-label={`Pack ${item.name}`} />
+                          <div className="min-w-0 flex-1">
+                            <p className={item.isPacked ? "text-sm text-blue-100/40 line-through" : "text-sm text-white"}>{item.name}</p>
+                            {item.reason && <p className="mt-1 text-xs text-blue-100/55">{item.reason}</p>}
+                          </div>
+                          <button type="button" aria-label={`Delete ${item.name}`} onClick={() => void handleDeletePacking(item._id)} className="rounded-md p-1 text-blue-100/45 hover:text-red-200"><Trash2 size={14} /></button>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ))}
+              </div>
+            </div>
+          </details>
+
+          <details className="rounded-3xl border border-white/10 bg-[#0b1c43] px-5 py-3 shadow-lg shadow-black/10">
+            <SectionHeading title="Accommodation" status="Optional" />
+            <p className="border-t border-white/10 py-4 text-sm text-blue-100/55">Accommodation planning is optional and can be added later.</p>
+          </details>
+        </div>
+
+        <aside className="space-y-4">
+          <section className="rounded-3xl border border-white/10 bg-[#0b1c43] p-5 shadow-lg shadow-black/10">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">Trip readiness</h2>
+              <span className="text-2xl font-bold text-cyan-200">{readiness?.percent ?? 0}%</span>
+            </div>
+            <p className="mt-2 text-xs text-blue-100/55">Documents 30 · Trip details 20 · Packing 50.</p>
+            <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-white/10">
+              <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-blue-500 to-violet-500 transition-all" style={{ width: `${readiness?.percent ?? 0}%` }} />
+            </div>
+            {readiness?.percent === 100 ? (
+              <p className="mt-4 text-sm font-semibold text-emerald-200">Everything looks ready.</p>
+            ) : (
+              <ul className="mt-4 space-y-2 text-sm text-blue-100/75">
+                {(readiness?.gaps ?? ["Loading readiness details..."]).map((gap) => <li key={gap}>• {gap}</li>)}
+              </ul>
+            )}
+            {readiness && (
+              <div className="mt-4 grid grid-cols-3 gap-2 border-t border-white/10 pt-4 text-center">
+                {[
+                  ["Documents", readiness.breakdown.documents, 30],
+                  ["Trip", readiness.breakdown.tripDetails, 20],
+                  ["Packing", readiness.breakdown.packing, 50],
+                ].map(([label, points, max]) => (
+                  <div key={label} className="rounded-xl bg-white/[0.04] p-2">
+                    <p className="text-sm font-bold text-white">{points}/{max}</p>
+                    <p className="mt-1 text-[10px] text-blue-100/50">{label}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button type="button" onClick={() => void handleExportCalendar()} className="mt-4 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-cyan-200/20 bg-cyan-300/10 px-4 text-sm font-semibold text-cyan-100 hover:bg-cyan-300/15">
+              <ArrowDownToLine size={16} /> Export calendar
+            </button>
+          </section>
+
+          <section className="rounded-3xl border border-white/10 bg-[#0b1c43] p-5 shadow-lg shadow-black/10">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[.17em] text-cyan-200">Destination weather</p>
+                <h2 className="mt-1 font-semibold">{trip.destination}</h2>
+              </div>
+              {weather && <span className="rounded-full bg-cyan-300/10 px-3 py-1 text-xs font-semibold text-cyan-100">{weather.label}</span>}
+            </div>
+            {weather ? (
+              <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="rounded-xl bg-white/[0.05] p-3"><p className="text-[10px] text-blue-100/50">Low</p><p className="mt-1 font-semibold">{weather.minTemperatureC}°C</p></div>
+                <div className="rounded-xl bg-white/[0.05] p-3"><p className="text-[10px] text-blue-100/50">High</p><p className="mt-1 font-semibold">{weather.maxTemperatureC}°C</p></div>
+                <div className="rounded-xl bg-white/[0.05] p-3"><p className="text-[10px] text-blue-100/50">Rain</p><p className="mt-1 font-semibold">{weather.rainChance}%</p></div>
+              </div>
+            ) : (
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <p className="text-sm text-blue-100/55">{weatherError || "Weather unavailable"}</p>
+                <button type="button" onClick={() => void handleRetryWeather()} disabled={retryingWeather} className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-white/10 disabled:opacity-50">
+                  {retryingWeather ? "Retrying..." : "Retry"}
                 </button>
               </div>
-            </form>
-          )}
-
-          <div className="mt-5 space-y-3">
-            {documents.length === 0 ? (
-              <p className="text-sm text-ink-500">No documents saved yet.</p>
-            ) : (
-              documents.map((document) => (
-                <button
-                  type="button"
-                  key={document._id}
-                  onClick={() => {
-                    setReviewDocumentId(document._id);
-                    setReviewFields(toEditableTicketFields(document.extractedData));
-                    setDocumentError("");
-                  }}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 text-left"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-medium text-ink-900">{document.title}</p>
-                    <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
-                      {document.status}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-xs text-ink-500">{document.type}</p>
-                  <span className="mt-2 inline-block text-xs font-semibold text-brand-700">Review</span>
-                </button>
-              ))
             )}
-          </div>
-        </section>
+          </section>
 
-        <section className="rounded-2xl border border-slate-200/70 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-ink-900">Packing checklist</h2>
-          <button
-            type="button"
-            onClick={handleGeneratePacking}
-            disabled={generatingPacking}
-            className={`${primaryButtonClass} mt-4 w-full`}
-          >
-            {generatingPacking ? "Generating..." : "Generate packing list"}
-          </button>
-
-          <form onSubmit={handleAddPackingItem} className="mt-4 space-y-3">
-            <Field label="Item">
-              <Input
-                value={packingForm.title}
-                onChange={(event) => setPackingForm({ ...packingForm, title: event.target.value })}
-                placeholder="e.g. Running shoes"
-              />
-            </Field>
-            <Field label="Category">
-              <Select
-                value={packingForm.category}
-                onChange={(event) => setPackingForm({ ...packingForm, category: event.target.value })}
-              >
-                {PACKING_CATEGORIES.map((category) => (
-                  <option key={category} value={category}>{category}</option>
+          <section className="rounded-3xl border border-white/10 bg-[#0b1c43] p-5 shadow-lg shadow-black/10">
+            <h2 className="font-semibold">Train timeline</h2>
+            {segments.length ? (
+              <ol className="mt-4 space-y-3">
+                {segments.map((segment, index) => (
+                  <li key={segment._id} className="flex gap-3">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-cyan-300/15 text-cyan-200"><Train size={15} /></span>
+                    <div className="min-w-0"><p className="text-sm font-medium">{segment.fromLocation} → {segment.toLocation}</p><p className="mt-1 text-xs text-blue-100/55">{segment.departure ? formatDateTime(segment.departure) : `Train leg ${index + 1}`}</p></div>
+                  </li>
                 ))}
-              </Select>
-            </Field>
-            <button type="submit" disabled={savingPackingItem} className={`${primaryButtonClass} w-full`}>
-              {savingPackingItem ? "Adding..." : "Add item"}
-            </button>
-          </form>
-
-          <ErrorBanner message={packingError} />
-
-          <div className="mt-5 space-y-3">
-            {packingItems.length === 0 ? (
-              <p className="text-sm text-ink-500">No packing items yet.</p>
-            ) : (
-              packingItems.map((item) => (
-                <label
-                  key={item._id}
-                  className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-ink-700"
-                >
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      checked={item.packed}
-                      onChange={() => handleTogglePacking(item._id)}
-                      className="h-4 w-4 accent-brand-600"
-                    />
-                    <span className={item.packed ? "line-through text-ink-400" : ""}>{item.title}</span>
-                  </div>
-                  <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">{item.category}</span>
-                </label>
-              ))
-            )}
-          </div>
-        </section>
+              </ol>
+            ) : <p className="mt-3 text-sm text-blue-100/55">Add a train leg or approve your ticket to start the timeline.</p>}
+          </section>
+        </aside>
       </div>
     </div>
   );
